@@ -1,0 +1,62 @@
+<div class="orders-container">
+    <h1>Order Management</h1>
+    
+    <div class="tab-actions">
+        <div class="filters">
+            <div class="form-group">
+                <label>Status Filter</label>
+                <select id="orderStatusFilter">
+                    <option value="">All Statuses</option>
+                    <option value="placed">Placed</option>
+                    <option value="assigned">Assigned</option>
+                    <option value="scheduled">Scheduled</option>
+                    <option value="out_for_delivery">Out for Delivery</option>
+                    <option value="delivered">Delivered</option>
+                    <option value="cancelled">Cancelled</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Date From</label>
+                <input type="date" id="orderDateFrom">
+            </div>
+            <div class="form-group">
+                <label>Date To</label>
+                <input type="date" id="orderDateTo">
+            </div>
+            <button class="btn btn-primary" onclick="loadOrders()">Apply Filters</button>
+            <button class="btn btn-secondary" onclick="resetOrderFilters()">Reset</button>
+        </div>
+    </div>
+    
+    <div class="data-table">
+        <table id="ordersTable">
+            <thead>
+                <tr>
+                    <th>Order #</th>
+                    <th>Customer</th>
+                    <th>Items</th>
+                    <th>Original Amount</th>
+                    <th>Discount</th>
+                    <th>Final Amount</th>
+                    <th>Status</th>
+                    <th>Type</th>
+                    <th>Date</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="8" style="text-align: center; padding: 20px; color: #666;">
+                        Loading orders...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    
+    <div class="pagination" id="ordersPagination">
+        <button class="btn btn-secondary" id="prevPage" disabled>Previous</button>
+        <span class="pagination-info" id="pageInfo">Page 1 of 1</span>
+        <button class="btn btn-secondary" id="nextPage" disabled>Next</button>
+    </div>
+</div>

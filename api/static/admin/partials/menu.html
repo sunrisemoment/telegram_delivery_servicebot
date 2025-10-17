@@ -1,0 +1,42 @@
+<div class="menu-container">
+    <h1>Menu Management</h1>
+    
+    <div class="tab-actions">
+        <button class="btn btn-primary" onclick="showAddMenuItemModal()">Add Menu Item</button>
+        <div class="search-box">
+            <input type="text" id="menuSearch" placeholder="Search menu items..." oninput="loadMenu()">
+        </div>
+        <select id="categoryFilter" onchange="loadMenu()">
+            <option value="">All Categories</option>
+        </select>
+        <select id="statusFilter" onchange="loadMenu()">
+            <option value="all">All Status</option>
+            <option value="active">Active Only</option>
+            <option value="inactive">Inactive Only</option>
+        </select>
+    </div>
+    
+    <div class="data-table">
+        <table id="menuTable">
+            <thead>
+                <tr>
+                    <th>Photo</th>
+                    <th>Category</th>
+                    <th>Name</th>
+                    <th>Description</th>
+                    <th>Price</th>
+                    <th>Stock</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="8" style="text-align: center; padding: 20px; color: #666;">
+                        Loading menu items...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

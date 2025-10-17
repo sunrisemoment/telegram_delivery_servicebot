@@ -1,0 +1,32 @@
+<div class="drivers-container">
+    <h1>Driver Management</h1>
+    
+    <div class="tab-actions">
+        <button class="btn btn-primary" onclick="showAddDriverModal()">Add Driver</button>
+        <div class="search-box">
+            <input type="text" id="driverSearch" placeholder="Search drivers..." oninput="loadDrivers()">
+        </div>
+    </div>
+    
+    <div class="data-table">
+        <table id="driversTable">
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>Telegram ID</th>
+                    <th>Status</th>
+                    <th>Delivered</th>
+                    <th>Active</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 20px; color: #666;">
+                        Loading drivers...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

@@ -1,0 +1,54 @@
+<div class="dashboard-container">
+    <h1>Dashboard Overview</h1>
+    
+    <div class="stats-grid" id="statsGrid">
+        <div class="stat-card">
+            <h3>Total Orders</h3>
+            <div class="value">--</div>
+        </div>
+        <div class="stat-card">
+            <h3>Total Revenue</h3>
+            <div class="value">--</div>
+        </div>
+        <div class="stat-card">
+            <h3>Active Customers</h3>
+            <div class="value">--</div>
+        </div>
+        <div class="stat-card">
+            <h3>Pending Orders</h3>
+            <div class="value">--</div>
+        </div>
+        <div class="stat-card">
+            <h3>Completed Orders</h3>
+            <div class="value">--</div>
+        </div>
+    </div>
+    
+    <div class="chart-container">
+        <div style="position: relative; height: 400px;">
+            <canvas id="revenueChart"></canvas>
+        </div>
+    </div>
+    
+    <div class="data-table">
+        <h3>Recent Orders</h3>
+        <table id="recentOrdersTable">
+            <thead>
+                <tr>
+                    <th>Order #</th>
+                    <th>Customer</th>
+                    <th>Amount</th>
+                    <th>Status</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="5" style="text-align: center; padding: 20px; color: #666;">
+                        Loading recent orders...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

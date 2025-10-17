@@ -1,0 +1,116 @@
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">Contact Information & Welcome Message</h3>
+                </div>
+                <div class="card-body">
+                    <!-- Welcome Message Section -->
+                    <div class="row mb-4">
+                        <div class="col-12">
+                            <h4>Welcome Message</h4>
+                            <p class="text-muted">This message will be sent to new customers when they first interact with the bot.</p>
+                            
+                            <div class="form-group">
+                                <label for="welcomeMessage">Welcome Message</label>
+                                <textarea class="form-control" id="welcomeMessage" rows="6" 
+                                          placeholder="Enter welcome message for new customers..."></textarea>
+                                <small class="form-text text-muted">
+                                    You can use HTML formatting. Use {{name}} for customer's first name if available.
+                                </small>
+                            </div>
+                            
+                            <button type="button" class="btn btn-primary" onclick="saveWelcomeMessage()">
+                                <i class="fas fa-save"></i> Save Welcome Message
+                            </button>
+                        </div>
+                    </div>
+
+                    <hr>
+
+                    <!-- Contact Information Section -->
+                    <div class="row">
+                        <div class="col-12">
+                            <h4>Contact Information</h4>
+                            <p class="text-muted">Store contact details that customers can use to reach you.</p>
+                            
+                            <form id="contactForm">
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-group">
+                                            <label for="telegramId">Telegram ID</label>
+                                            <input type="number" class="form-control" id="telegramId" 
+                                                   placeholder="Enter Telegram ID (numeric)">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-group">
+                                            <label for="telegramUsername">Telegram Username</label>
+                                            <input type="text" class="form-control" id="telegramUsername" 
+                                                   placeholder="@username">
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="form-group">
+                                            <label for="phoneNumber">Phone Number</label>
+                                            <input type="tel" class="form-control" id="phoneNumber" 
+                                                   placeholder="+1 (555) 123-4567">
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="form-group">
+                                            <label for="emailAddress">Email Address</label>
+                                            <input type="email" class="form-control" id="emailAddress" 
+                                                   placeholder="contact@yourstore.com">
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="additionalInfo">Additional Contact Information</label>
+                                    <textarea class="form-control" id="additionalInfo" rows="3" 
+                                              placeholder="Any additional contact details or instructions..."></textarea>
+                                </div>
+                                
+                                <button type="button" class="btn btn-success" onclick="saveContactInfo()">
+                                    <i class="fas fa-save"></i> Save Contact Information
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <!-- Preview Section -->
+                    <hr>
+                    <div class="row mt-4" style="display: none;">
+                        <div class="col-12">
+                            <h4>Preview</h4>
+                            <div class="card">
+                                <div class="card-body">
+                                    <h5>Welcome Message Preview:</h5>
+                                    <div id="welcomePreview" class="border p-3 bg-light rounded">
+                                        Welcome message will appear here...
+                                    </div>
+                                    
+                                    <h5 class="mt-3">Contact Information Preview:</h5>
+                                    <div id="contactPreview" class="border p-3 bg-light rounded">
+                                        Contact information will appear here...
+                                    </div>
+                                    
+                                    <button type="button" class="btn btn-info mt-3" onclick="updatePreviews()">
+                                        <i class="fas fa-sync"></i> Update Previews
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="js/contact.js"></script>

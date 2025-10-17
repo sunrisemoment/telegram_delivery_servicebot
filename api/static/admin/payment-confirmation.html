@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC Payment Confirmation - Admin Panel</title>
+    <link href="styles/main.css" rel="stylesheet">
+    <style>
+        .payment-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        .payment-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-left: 4px solid #f0ad4e;
+        }
+        
+        .payment-card.confirmed {
+            border-left-color: #5cb85c;
+            opacity: 0.7;
+        }
+        
+        .payment-header {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .order-number {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .payment-amount {
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #e74c3c;
+        }
+        
+        .customer-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .info-item {
+            margin-bottom: 8px;
+        }
+        
+        .info-label {
+            font-weight: bold;
+            color: #666;
+        }
+        
+        .btc-address {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            word-break: break-all;
+            margin: 10px 0;
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        .btn-confirm {
+            background: #5cb85c;
+            color: white;
+        }
+        
+        .btn-reject {
+            background: #d9534f;
+            color: white;
+        }
+        
+        .btn-check {
+            background: #f0ad4e;
+            color: white;
+        }
+        
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .status-badge {
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        
+        .status-pending {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .status-confirmed {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .no-payments {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .payment-details {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        
+        .explorer-link {
+            color: #007bff;
+            text-decoration: none;
+        }
+        
+        .explorer-link:hover {
+            text-decoration: underline;
+        }
+        
+        .refresh-btn {
+            background: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 20px;
+        }
+        
+        .tab-container {
+            margin-bottom: 20px;
+        }
+        
+        .tab {
+            padding: 10px 20px;
+            background: #e9ecef;
+            border: none;
+            cursor: pointer;
+            margin-right: 5px;
+        }
+        
+        .tab.active {
+            background: #007bff;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>BTC Payment Confirmation</h1>
+            <nav>
+                <a href="index.html"> Dashboard</a>
+            </nav>
+        </header>
+
+        <div class="payment-container">
+            <div class="tab-container">
+                <button class="tab active" onclick="showTab('pending')">Pending Confirmation</button>
+                <button class="tab" onclick="showTab('confirmed')">Confirmed Payments</button>
+                <button class="tab" onclick="showTab('all')">All BTC Payments</button>
+            </div>
+
+            <button class="refresh-btn" onclick="loadPayments()">🔄 Refresh</button>
+            
+            <div id="loading" class="loading">
+                Loading pending payments...
+            </div>
+            
+            <div id="payments-list"></div>
+            
+            <div id="no-payments" class="no-payments" style="display: none;">
+                No pending payments found.
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'pending';
+        let allPayments = [];
+        
+        // Load payments when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            loadPayments();
+        });
+        
+        function showTab(tabName) {
+            currentTab = tabName;
+            
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // Filter and display payments
+            filterPayments();
+        }
+        
+        function filterPayments() {
+            let filteredPayments = [];
+            
+            switch(currentTab) {
+                case 'pending':
+                    filteredPayments = allPayments.filter(p => !p.payment_confirmed && p.payment_status !== 'cancelled');
+                    break;
+                case 'confirmed':
+                    filteredPayments = allPayments.filter(p => p.payment_confirmed);
+                    break;
+                case 'all':
+                    filteredPayments = allPayments;
+                    break;
+            }
+            
+            displayPayments(filteredPayments);
+        }
+        
+        async function loadPayments() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('no-payments').style.display = 'none';
+            
+            try {
+                const response = await fetch('/admin/payments/btc-all');
+                if (response.ok) {
+                    allPayments = await response.json();
+                    filterPayments();
+                } else {
+                    throw new Error('Failed to load payments');
+                }
+            } catch (error) {
+                console.error('Error loading payments:', error);
+                document.getElementById('payments-list').innerHTML = `
+                    <div class="payment-card">
+                        <div style="color: #d9534f; text-align: center;">
+                            Error loading payments. Please try again.
+                        </div>
+                    </div>
+                `;
+            } finally {
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+        
+        function displayPayments(payments) {
+            const paymentsList = document.getElementById('payments-list');
+            const noPayments = document.getElementById('no-payments');
+            
+            if (payments.length === 0) {
+                paymentsList.innerHTML = '';
+                noPayments.style.display = 'block';
+                return;
+            }
+            
+            noPayments.style.display = 'none';
+            
+            paymentsList.innerHTML = payments.map(payment => `
+                <div class="payment-card ${payment.payment_confirmed ? 'confirmed' : ''}">
+                    <div class="payment-header">
+                        <div>
+                            <span class="order-number">Order #${payment.order_number}</span>
+                            <span class="status-badge status-${payment.payment_confirmed ? 'confirmed' : 'pending'}">
+                                ${payment.payment_confirmed ? 'Confirmed' : 'Pending'}
+                            </span>
+                        </div>
+                        <div class="payment-amount">$${payment.total_amount}</div>
+                    </div>
+                    
+                    <div class="customer-info">
+                        <div>
+                            <div class="info-item">
+                                <span class="info-label">Customer:</span> 
+                                ${payment.customer_telegram_id ? `@${payment.customer_telegram_id}` : 'N/A'}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Phone:</span> 
+                                ${payment.customer_phone || 'N/A'}
+                            </div>
+                        </div>
+                        <div>
+                            <div class="info-item">
+                                <span class="info-label">Order Type:</span> 
+                                ${payment.delivery_type}
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Created:</span> 
+                                ${new Date(payment.created_at).toLocaleString()}
+                            </div>
+                        </div>
+                    </div>
+                    
+                    ${payment.delivery_address ? `
+                        <div class="info-item">
+                            <span class="info-label">Delivery Address:</span> 
+                            ${payment.delivery_address}
+                        </div>
+                    ` : ''}
+                    
+                    <div class="payment-details">
+                        <div class="info-item">
+                            <span class="info-label">Subtotal:</span> $${payment.subtotal}
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Delivery Fee:</span> $${payment.delivery_fee}
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Total:</span> <strong>$${payment.total_amount}</strong>
+                        </div>
+                        
+                        ${payment.btc_address ? `
+                            <div class="info-item">
+                                <span class="info-label">BTC Address:</span>
+                                <div class="btc-address">${payment.btc_address}</div>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">BTC Amount:</span> ${payment.btc_amount} BTC
+                            </div>
+                        ` : ''}
+                        
+                        ${payment.payment_txid ? `
+                            <div class="info-item">
+                                <span class="info-label">Transaction ID:</span>
+                                <div class="btc-address">${payment.payment_txid}</div>
+                            </div>
+                        ` : ''}
+                    </div>
+                    
+                    ${payment.explorer_url ? `
+                        <div class="info-item">
+                            <a href="${payment.explorer_url}" target="_blank" class="explorer-link">
+                                🔍 View on Blockchain Explorer
+                            </a>
+                        </div>
+                    ` : ''}
+                    
+                    ${!payment.payment_confirmed ? `
+                        <div class="action-buttons">
+                            <button class="btn btn-check" onclick="checkPayment('${payment.order_number}')">
+                                🔍 Check Payment
+                            </button>
+                            <button class="btn btn-confirm" onclick="confirmPayment('${payment.order_number}')">
+                                ✅ Confirm Payment
+                            </button>
+                            <button class="btn btn-reject" onclick="rejectPayment('${payment.order_number}')">
+                                ❌ Reject Payment
+                            </button>
+                        </div>
+                    ` : `
+                        <div class="info-item">
+                            <span class="info-label">Confirmed by:</span> Admin #${payment.payment_confirmed_by}
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">Confirmed at:</span> 
+                            ${payment.payment_confirmed_at ? new Date(payment.payment_confirmed_at).toLocaleString() : 'N/A'}
+                        </div>
+                    `}
+                </div>
+            `).join('');
+        }
+        
+        async function confirmPayment(orderNumber) {
+            if (!confirm(`Are you sure you want to confirm payment for order ${orderNumber}?`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/admin/payments/confirm-btc/${orderNumber}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        confirmed_by: 1, // This should be the actual admin ID
+                        notes: 'Manually confirmed via admin panel'
+                    })
+                });
+                
+                if (response.ok) {
+                    alert('Payment confirmed successfully!');
+                    loadPayments(); // Refresh the list
+                } else {
+                    throw new Error('Failed to confirm payment');
+                }
+            } catch (error) {
+                console.error('Error confirming payment:', error);
+                alert('Error confirming payment. Please try again.');
+            }
+        }
+        
+        async function rejectPayment(orderNumber) {
+            if (!confirm(`Are you sure you want to reject payment for order ${orderNumber}? This will cancel the order.`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/admin/orders/${orderNumber}/status`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        status: 'cancelled',
+                        reason: 'Payment rejected by admin'
+                    })
+                });
+                
+                if (response.ok) {
+                    alert('Order cancelled successfully!');
+                    loadPayments(); // Refresh the list
+                } else {
+                    throw new Error('Failed to cancel order');
+                }
+            } catch (error) {
+                console.error('Error cancelling order:', error);
+                alert('Error cancelling order. Please try again.');
+            }
+        }
+        
+        async function checkPayment(orderNumber) {
+            try {
+                // This would integrate with your BTC payment processor API
+                // For now, we'll just show a message
+                alert(`Checking payment status for order ${orderNumber}...\n\nIn a real implementation, this would check the blockchain for the transaction.`);
+                
+                // Example integration with BlockCypher or similar service
+                // const response = await fetch(`/admin/payments/check-btc/${orderNumber}`);
+                // const result = await response.json();
+                // alert(`Payment check result: ${JSON.stringify(result, null, 2)}`);
+                
+            } catch (error) {
+                console.error('Error checking payment:', error);
+                alert('Error checking payment status.');
+            }
+        }
+    </script>
+</body>
+</html>

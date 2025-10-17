@@ -1,0 +1,43 @@
+name: Deploy Delivery Bot App
+
+on:
+  push:
+    branches:
+      - main   # deploy only when pushing to main
+
+jobs:
+  deploy:
+    runs-on: self-hosted   # uses your VPS runner
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Api dependencies
+        run: |
+          cd /home/deploy/apps/delivery_bot || { mkdir -p /home/deploy/apps/delivery_bot && cd /home/deploy/apps/delivery_bot; }
+          # sync repo files into app directory
+          rsync -av --delete $GITHUB_WORKSPACE/ /home/deploy/apps/delivery_bot/
+          cd /home/deploy/apps/delivery_bot/api/
+          # create venv if missing
+          if [ ! -d "venv" ]; then python3 -m venv venv; fi
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Install Bot dependencies
+        run: |
+          cd /home/deploy/apps/delivery_bot/bot/
+          # create venv if missing
+          if [ ! -d "venv" ]; then python3 -m venv venv; fi
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Restart api service
+        run: |
+          sudo systemctl restart delivery_api
+
+      - name: Restart bot service
+        run: |
+          sudo systemctl restart delivery_bot

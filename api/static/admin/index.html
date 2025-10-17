@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delivery Bot Admin</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <link rel="stylesheet" href="css/admin.css">
+</head>
+<body>
+    <div class="sidebar">
+        <h2>Delivery Bot Admin</h2>
+        <ul>
+            <li class="active" onclick="showTab('dashboard', event)">📊 Dashboard</li>
+            <li onclick="showTab('pickup_locations', event)">📍 Pickup Locations</li>
+            <li onclick="showTab('orders', event)">📦 Orders</li>
+            <li onclick="showTab('customers', event)">👥 Customers</li>
+            <li onclick="showTab('drivers', event)">🚗 Drivers</li>
+            <li onclick="showTab('menu', event)">🍽️ Menu</li>
+            <li onclick="showTab('inventory', event)">📦 Inventory</li>
+            <li onclick="showTab('payments', event)">🪙 Payments</li>
+            <li onclick="showTab('contact', event)">📞 Contact</li>
+            <li onclick="showTab('settings', event)">⚙️ Settings</li>
+            <li onclick="logout()">➡️ Logout</li>
+        </ul>
+    </div>
+
+    <div class="main-content" id="mainContent">
+        <!-- Content will be loaded dynamically -->
+        <div class="loading" id="loading">
+            <div class="loading-spinner"></div>
+            <p>Loading...</p>
+        </div>
+    </div>
+
+    <!-- Modal containers -->
+    <div id="modalContainer"></div>
+
+    <!-- Core scripts -->
+    <script src="js/admin.js"></script>
+    <script src="js/dashboard.js"></script>
+    <script src="js/pickup_locations.js"></script>
+    <script src="js/orders.js"></script>
+    <script src="js/customers.js"></script>
+    <script src="js/drivers.js"></script>
+    <script src="js/menu.js"></script>
+    <script src="js/inventory.js"></script>
+    <script src="js/contact.js"></script>
+    <script src="js/settings.js"></script>
+
+    <script>
+        // Check authentication on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const storedAuth = localStorage.getItem('adminAuth');
+            if (!storedAuth) {
+                window.location.href = '/admin/login.html';
+                return;
+            }
+            
+            axios.defaults.headers.common['Authorization'] = `Basic ${storedAuth}`;
+            showTab('dashboard');
+        });
+    </script>
+</body>
+</html>

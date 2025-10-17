@@ -1,0 +1,31 @@
+<div class="inventory-container">
+    <h1>Inventory Management</h1>
+    
+    <div class="tab-actions">
+        <button class="btn btn-primary" onclick="loadReservations()">Refresh Reservations</button>
+        <button class="btn btn-warning" onclick="cleanupExpiredReservations()">Cleanup Expired</button>
+    </div>
+    
+    <div class="data-table">
+        <h3>Active Reservations</h3>
+        <table id="reservationsTable">
+            <thead>
+                <tr>
+                    <th>Order #</th>
+                    <th>Item</th>
+                    <th>Quantity</th>
+                    <th>Created</th>
+                    <th>Expires</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 20px; color: #666;">
+                        Loading reservations...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
