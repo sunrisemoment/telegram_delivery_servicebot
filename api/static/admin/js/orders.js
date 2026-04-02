@@ -1,6 +1,17 @@
 let ordersCurrentPage = 1;
 const ordersPerPage = 20;
 
+function formatPaymentType(paymentType) {
+    const labels = {
+        btc: 'Bitcoin',
+        cash: 'Cash',
+        cashapp: 'Cash App',
+        apple_cash: 'Apple Cash',
+        card: 'Card'
+    };
+    return labels[paymentType] || paymentType || 'Unknown';
+}
+
 async function initOrders() {
     // Set default dates
     const today = new Date().toISOString().split('T')[0];
@@ -65,6 +76,7 @@ function updateOrdersTable(orders) {
     tbody.innerHTML = orders.map(order => {
         const isCompleted = ['delivered', 'cancelled'].includes(order.status);
         const isPickup = (order.delivery_or_pickup === 'pickup' || order.delivery_type === 'pickup');
+        const canAssignDriver = !isCompleted && !!order.payment_confirmed;
         
         return `
             <tr>
@@ -84,7 +96,9 @@ function updateOrdersTable(orders) {
                 <td>
                     <span class="status-badge ${order.status}">${order.status}</span>
                     ${order.driver_name ? `<br><small>Driver: ${order.driver_name}</small>` : ''}
-                    ${order.payment_type === 'btc' ? `<br><small style="color: #27ae60;">💰 BTC Payment</small>` : ''}
+                    <br><small style="color: ${order.payment_confirmed ? '#27ae60' : '#d35400'};">
+                        ${order.payment_confirmed ? '✅ Payment Approved' : '⏳ Awaiting Payment Approval'}
+                    </small>
                 </td>
                 <td>${order.delivery_or_pickup || order.delivery_type || 'N/A'}</td>
                 <td>${formatDate(order.created_at)}</td>
@@ -93,7 +107,9 @@ function updateOrdersTable(orders) {
                     
                     ${!isCompleted ? `
                         <!-- Active Order Actions -->
-                        <button class="btn btn-info btn-sm" onclick="showAssignDriverModal('${order.order_number}')">Assign Driver</button>
+                        <button class="btn btn-info btn-sm" onclick="showAssignDriverModal('${order.order_number}')" ${canAssignDriver ? '' : 'disabled'}>
+                            Assign Driver
+                        </button>
                         <button class="btn btn-secondary btn-sm" onclick="showUpdateDeliveryTimeModal('${order.order_number}', '${order.delivery_slot_et || order.delivery_slot || ''}')">
                             Update Time
                         </button>
@@ -160,8 +176,11 @@ async function viewOrder(orderNumber) {
             ? (order.delivery_address || order.customer_address || 'No delivery address specified')
             : (order.pickup_address || order.delivery_address_text || 'Pickup order');
         
-        const driversResponse = await axios.get(`${API_BASE}/orders/${orderNumber}/available-drivers`);
-        const availableDrivers = driversResponse.data;
+        let availableDrivers = [];
+        if (order.payment_confirmed) {
+            const driversResponse = await axios.get(`${API_BASE}/orders/${orderNumber}/available-drivers`);
+            availableDrivers = driversResponse.data;
+        }
 
         const modalContent = `
             <div class="modal-header">
@@ -185,9 +204,9 @@ async function viewOrder(orderNumber) {
                             </div>
                             <div>
                                 <p><strong>Status:</strong> <span class="status-badge ${order.status}">${order.status}</span></p>
-                                <p><strong>Payment:</strong> ${order.payment_type || 'N/A'} 
-                                    <span class="status-badge ${order.payment_status === 'paid_confirmed' ? 'delivered' : order.payment_status === 'pending' ? 'placed' : 'cancelled'}">
-                                        ${order.payment_status || 'Unknown'}
+                                <p><strong>Payment:</strong> ${formatPaymentType(order.payment_type)} 
+                                    <span class="status-badge ${order.payment_confirmed ? 'delivered' : 'placed'}">
+                                        ${order.payment_confirmed ? 'approved' : 'awaiting approval'}
                                     </span>
                                 </p>
                                 <p><strong>Delivery Slot:</strong> ${order.delivery_slot ? formatDateTime(order.delivery_slot) : 'Not set'}</p>
@@ -214,8 +233,12 @@ async function viewOrder(orderNumber) {
                                     ${order.btc_address ? `<p><strong>BTC Address:</strong> <code style="font-size: 12px;">${order.btc_address}</code></p>` : ''}
                                 ` : order.payment_type === 'cash' ? `
                                     <p><strong>Payment Method:</strong> Cash on Delivery</p>
+                                ` : order.payment_type === 'cashapp' ? `
+                                    <p><strong>Payment Method:</strong> 💚 Cash App</p>
+                                ` : order.payment_type === 'apple_cash' ? `
+                                    <p><strong>Payment Method:</strong> 🍎 Apple Cash</p>
                                 ` : `
-                                    <p><strong>Payment Method:</strong> ${order.payment_type || 'Not specified'}</p>
+                                    <p><strong>Payment Method:</strong> ${formatPaymentType(order.payment_type)}</p>
                                 `}
                             </div>
                         </div>
@@ -245,8 +268,13 @@ async function viewOrder(orderNumber) {
                                 ${order.driver?.telegram_id ? `(TG: ${order.driver.telegram_id})` : ''}
                             </p>
                         </div>
+                        ${!order.payment_confirmed ? `
+                            <div style="padding: 12px; background: #fff3cd; border-radius: 8px; color: #7d5b00; margin-bottom: 12px;">
+                                Driver dispatch is blocked until payment approval is marked by admin.
+                            </div>
+                        ` : ''}
                         <div style="display: flex; gap: 10px; align-items: center;">
-                            <select id="orderDetailDriverSelect" style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px;">
+                            <select id="orderDetailDriverSelect" style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px;" ${order.payment_confirmed ? '' : 'disabled'}>
                                 <option value="">-- Select driver --</option>
                                 ${availableDrivers.map(driver => `
                                     <option value="${driver.id}" ${driver.already_assigned ? 'selected' : ''}>
@@ -254,7 +282,7 @@ async function viewOrder(orderNumber) {
                                     </option>
                                 `).join('')}
                             </select>
-                            <button class="btn btn-info" onclick="assignDriverFromDetails('${order.order_number}')">
+                            <button class="btn btn-info" onclick="assignDriverFromDetails('${order.order_number}')" ${order.payment_confirmed ? '' : 'disabled'}>
                                 Assign Driver
                             </button>
                         </div>
@@ -346,6 +374,18 @@ async function viewOrder(orderNumber) {
                                         ` : ''}
                                     </div>
                                 `).join('')}
+                            </div>
+                        </div>
+                    ` : ''}
+
+                    <!-- Payment Actions -->
+                    ${!order.payment_confirmed ? `
+                        <div class="order-section">
+                            <h4 style="margin-bottom: 15px; color: #2c3e50; border-bottom: 2px solid #27ae60; padding-bottom: 8px;">💳 Payment Actions</h4>
+                            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                                <button class="btn btn-success btn-sm" onclick="markOrderAsPaid('${order.order_number}')">
+                                    ✅ Mark as Paid
+                                </button>
                             </div>
                         </div>
                     ` : ''}
@@ -663,7 +703,7 @@ async function deleteOrder(orderNumber, permanent = false) {
             await axios.delete(`${API_BASE}/orders/${orderNumber}/permanent`);
             showNotification(`Order ${orderNumber} permanently deleted!`, 'success');
         } else {
-            await axios.put(`${API_BASE}/orders/${orderNumber}/status`, { 
+            await axios.post(`${API_BASE}/orders/${orderNumber}/status`, { 
                 status: 'cancelled',
                 reason: 'Cancelled by admin'
             });
@@ -722,11 +762,36 @@ async function updateOrderStatus(orderNumber, status) {
     }
     
     try {
-        await axios.put(`${API_BASE}/orders/${orderNumber}/status`, { status });
+        await axios.post(`${API_BASE}/orders/${orderNumber}/status`, { status });
         showNotification(`Order status updated to ${status}`, 'success');
         loadOrders();
     } catch (error) {
         console.error('Error updating order status:', error);
         showNotification('Error updating order status', 'error');
+    }
+}
+
+async function markOrderAsPaid(orderNumber) {
+    const notes = prompt('Enter payment confirmation notes (optional):');
+    if (notes === null) {
+        return; // User cancelled
+    }
+    
+    try {
+        const response = await axios.post(`${API_BASE}/payments/mark-paid/${orderNumber}`, {
+            notes: notes || ''
+        });
+        
+        showNotification(`Order ${orderNumber} marked as paid successfully!`, 'success');
+        
+        // Refresh order details if modal is open
+        if (document.getElementById('orderDetailsModal')) {
+            viewOrder(orderNumber);
+        } else {
+            loadOrders();
+        }
+    } catch (error) {
+        console.error('Error marking order as paid:', error);
+        showNotification(`Error: ${error.response?.data?.detail || 'Failed to mark order as paid'}`, 'error');
     }
 }

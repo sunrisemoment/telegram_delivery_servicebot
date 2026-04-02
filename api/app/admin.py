@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
 import os
+import random
 import shutil
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from .database import get_db
-from . import crud, models
+from . import crud, models, schemas
 import csv
 from datetime import datetime, timedelta, date
 from io import StringIO
@@ -21,6 +22,13 @@ from typing import List, Optional
 from .telegram_service import telegram_service
 import logging
 from .auth import verify_admin_credentials  # Add this import
+from .dispatch_rules import (
+    ACTIVE_DRIVER_ORDER_STATUSES,
+    driver_can_accept_order,
+    get_driver_active_order_count,
+    get_payment_label,
+    normalize_order_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +40,58 @@ UPLOAD_DIR = "static/uploads"
 def get_current_admin(username: str = Depends(verify_admin_credentials)):
     """Dependency to ensure user is authenticated as admin"""
     return username
+
+
+def _generate_invite_code(db: Session) -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        code = "".join(random.choice(alphabet) for _ in range(8))
+        existing = db.query(models.CustomerInvite).filter(models.CustomerInvite.code == code).first()
+        if not existing:
+            return code
+
+
+def _get_or_create_admin_customer(db: Session) -> models.Customer:
+    admin_customer = db.query(models.Customer).filter(models.Customer.telegram_id == 0).first()
+    if admin_customer:
+        return admin_customer
+
+    admin_customer = models.Customer(
+        telegram_id=0,
+        phone="admin",
+        display_name="Admin",
+        alias_username="admin",
+        account_status="active",
+    )
+    db.add(admin_customer)
+    db.commit()
+    db.refresh(admin_customer)
+    return admin_customer
+
+
+def _serialize_invite(invite: models.CustomerInvite) -> dict:
+    return {
+        "id": invite.id,
+        "code": invite.code,
+        "alias_username": invite.alias_username,
+        "alias_email": invite.alias_email,
+        "notes": invite.notes,
+        "status": invite.status,
+        "claimed_by_customer_id": invite.claimed_by_customer_id,
+        "claimed_by_telegram_id": invite.claimed_by_telegram_id,
+        "claimed_at": invite.claimed_at.isoformat() if invite.claimed_at else None,
+        "created_at": invite.created_at.isoformat() if invite.created_at else None,
+        "revoked_at": invite.revoked_at.isoformat() if invite.revoked_at else None,
+    }
+
+
+def _normalize_alias_username(alias_username: str | None) -> str | None:
+    if not alias_username:
+        return None
+    normalized = "".join(char.lower() if char.isalnum() else "_" for char in alias_username.strip())
+    normalized = normalized.strip("_")
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    return normalized or None
 
 @router.get("/export_csv")
 async def export_csv(date: str, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
@@ -145,6 +205,88 @@ async def get_customer_orders(customer_id: int, db: Session = Depends(get_db), a
     
     return order_data
 
+
+@router.get("/invites")
+async def admin_get_invites(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    """Get all invite codes for Mini App onboarding."""
+    del admin
+    invites = db.query(models.CustomerInvite).order_by(models.CustomerInvite.created_at.desc()).all()
+    return [_serialize_invite(invite) for invite in invites]
+
+
+@router.post("/invites")
+async def admin_create_invite(
+    invite_data: schemas.CustomerInviteCreate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    """Create a new invite code for Mini App onboarding."""
+    del admin
+
+    alias_email = invite_data.alias_email.strip().lower() if invite_data.alias_email else None
+    alias_username = _normalize_alias_username(invite_data.alias_username)
+
+    if alias_username:
+        existing_username = db.query(models.Customer).filter(models.Customer.alias_username == alias_username).first()
+        if existing_username:
+            raise HTTPException(status_code=409, detail="Alias username already belongs to an existing customer")
+        existing_invite_username = db.query(models.CustomerInvite).filter(
+            models.CustomerInvite.alias_username == alias_username,
+            models.CustomerInvite.status != "revoked"
+        ).first()
+        if existing_invite_username:
+            raise HTTPException(status_code=409, detail="Alias username already exists on an active invite")
+
+    if alias_email:
+        existing_customer = db.query(models.Customer).filter(models.Customer.alias_email == alias_email).first()
+        if existing_customer:
+            raise HTTPException(status_code=409, detail="Alias email already belongs to an existing customer")
+        existing_invite_email = db.query(models.CustomerInvite).filter(
+            models.CustomerInvite.alias_email == alias_email,
+            models.CustomerInvite.status != "revoked"
+        ).first()
+        if existing_invite_email:
+            raise HTTPException(status_code=409, detail="Alias email already exists on an active invite")
+
+    admin_customer = _get_or_create_admin_customer(db)
+    invite = models.CustomerInvite(
+        code=_generate_invite_code(db),
+        alias_username=alias_username,
+        alias_email=alias_email,
+        notes=invite_data.notes,
+        status="pending",
+        created_by=admin_customer.id,
+    )
+    db.add(invite)
+    db.commit()
+    db.refresh(invite)
+
+    return _serialize_invite(invite)
+
+
+@router.post("/invites/{invite_id}/revoke")
+async def admin_revoke_invite(
+    invite_id: int,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    """Revoke an unused invite."""
+    del admin
+
+    invite = db.query(models.CustomerInvite).filter(models.CustomerInvite.id == invite_id).first()
+    if not invite:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    if invite.status == "claimed":
+        raise HTTPException(status_code=409, detail="Claimed invites cannot be revoked")
+
+    invite.status = "revoked"
+    invite.revoked_at = datetime.now()
+    db.commit()
+    return {"message": "Invite revoked", "invite": _serialize_invite(invite)}
+
 # Driver Management Endpoints
 @router.get("/drivers")
 async def admin_get_drivers(
@@ -162,7 +304,13 @@ async def create_driver(driver_data: dict, db: Session = Depends(get_db), admin:
     driver = models.Driver(
         telegram_id=driver_data['telegram_id'],
         name=driver_data['name'],
-        active=driver_data.get('active', True)
+        active=driver_data.get('active', True),
+        is_online=driver_data.get('is_online', True),
+        accepts_delivery=driver_data.get('accepts_delivery', True),
+        accepts_pickup=driver_data.get('accepts_pickup', True),
+        max_delivery_distance_miles=driver_data.get('max_delivery_distance_miles', 15.0),
+        max_concurrent_orders=driver_data.get('max_concurrent_orders', 1),
+        pickup_address_id=driver_data.get('pickup_address_id')
     )
     
     db.add(driver)
@@ -197,15 +345,6 @@ async def admin_get_orders(
     """Get all orders with filters"""
     return get_all_orders(db, skip, limit, status)
 
-@router.put("/orders/{order_number}/status")
-async def update_order_status_endpoint(order_number: str, status_data: dict, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
-    """Update order status"""
-    order = update_order_status(db, order_number, status_data['status'], status_data.get('driver_id'))
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    
-    return {"message": "Order status updated successfully"}
-
 @router.get("/orders/{order_number}")
 async def get_order_details(order_number: str, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
     """Get detailed order information"""
@@ -228,14 +367,20 @@ async def get_order_details(order_number: str, db: Session = Depends(get_db), ad
             "telegram_id": driver.telegram_id
         } if driver else None,
         "items": order.items,
+        "subtotal_cents": order.subtotal_cents,
         "subtotal": order.subtotal_cents / 100,
         "delivery_type": order.delivery_or_pickup,
+        "delivery_fee_cents": order.delivery_fee_cents,
         "delivery_fee": order.delivery_fee_cents / 100,
         "delivery_address": order.delivery_address_text,
         "pickup_address": order.pickup_address_text,
+        "total_cents": order.total_cents,
         "total": order.total_cents / 100,
-        "status": order.status,
+        "status": normalize_order_status(order.status),
         "payment_status": order.payment_status,
+        "payment_confirmed": order.payment_confirmed,
+        "payment_confirmed_by": order.payment_confirmed_by,
+        "payment_confirmed_at": order.payment_confirmed_at.isoformat() if order.payment_confirmed_at else None,
         "payment_type": order.payment_type,
         "delivery_slot": order.delivery_slot_et.isoformat() if order.delivery_slot_et else None,
         "notes": order.notes,
@@ -288,6 +433,7 @@ async def delete_menu_item_endpoint(item_id: int, db: Session = Depends(get_db),
 async def get_all_menu_items(
     active_only: bool = Query(True),
     category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     admin: str = Depends(get_current_admin)
 ):
@@ -299,6 +445,14 @@ async def get_all_menu_items(
     
     if category:
         query = query.filter(models.MenuItem.category == category)
+
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.filter(
+            (models.MenuItem.name.ilike(pattern))
+            | (models.MenuItem.category.ilike(pattern))
+            | (models.MenuItem.description.ilike(pattern))
+        )
     
     items = query.order_by(models.MenuItem.category, models.MenuItem.name).all()
     
@@ -402,25 +556,32 @@ async def get_available_drivers(order_number: str, db: Session = Depends(get_db)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
-    # Get active drivers who don't have too many active orders
+    # Get active drivers that are currently online
     active_drivers = db.query(models.Driver).filter(
-        models.Driver.active == True
+        models.Driver.active == True,
+        models.Driver.is_online == True
     ).all()
     
     # Calculate active orders for each driver
     drivers_with_stats = []
     for driver in active_drivers:
-        active_order_count = db.query(models.Order).filter(
-            models.Order.driver_id == driver.id,
-            models.Order.status.in_(['assigned', 'out_for_delivery', 'scheduled'])
-        ).count()
+        active_order_count = get_driver_active_order_count(db, driver.id, exclude_order_id=order.id)
+        can_accept, reason = driver_can_accept_order(db, driver, order)
+        if not can_accept and driver.id != order.driver_id:
+            continue
         
         drivers_with_stats.append({
             "id": driver.id,
             "name": driver.name,
             "telegram_id": driver.telegram_id,
             "active_orders": active_order_count,
-            "already_assigned": driver.id == order.driver_id
+            "already_assigned": driver.id == order.driver_id,
+            "is_online": driver.is_online,
+            "accepts_delivery": driver.accepts_delivery,
+            "accepts_pickup": driver.accepts_pickup,
+            "max_delivery_distance_miles": driver.max_delivery_distance_miles,
+            "max_concurrent_orders": driver.max_concurrent_orders,
+            "dispatch_note": reason if driver.id == order.driver_id else None,
         })
     
     return drivers_with_stats
@@ -439,9 +600,16 @@ async def assign_driver_to_order(
     
     logger.info(f"Assigning driver {driver_id} to order {order_number}")
     
+    # Get current order status before assignment
+    order = db.query(models.Order).filter(models.Order.order_number == order_number).first()
+    old_status = order.status if order else 'unknown'
+    
     # Assign order to driver
     from .admin_crud import assign_order_to_driver
-    assignment_result = assign_order_to_driver(db, order_number, driver_id)
+    try:
+        assignment_result = assign_order_to_driver(db, order_number, driver_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     
     if not assignment_result:
         raise HTTPException(status_code=404, detail="Order or driver not found")
@@ -465,17 +633,30 @@ async def assign_driver_to_order(
     else:
         logger.warning(f"Driver {driver.name} has no Telegram ID, cannot send notification")
     
-    # Send notification to customer
+    # Send notification to customer with pickup address if it's a pickup order
     customer_notification_sent = False
     customer = assignment_result["customer"]
     
     if customer and customer.telegram_id:
         logger.info(f"Attempting to send customer notification for order {order_number}")
+        
+        # Get pickup address from driver if it's a pickup order
+        pickup_info = ""
+        if order.delivery_or_pickup == 'pickup' and driver.pickup_address_id:
+            pickup_address = db.query(models.PickupAddress).filter(
+                models.PickupAddress.id == driver.pickup_address_id
+            ).first()
+            if pickup_address:
+                pickup_info = f"\n📍 <b>Pickup Location:</b>\n{pickup_address.name}\n{pickup_address.address}"
+                if pickup_address.instructions:
+                    pickup_info += f"\n📝 <b>Instructions:</b> {pickup_address.instructions}"
+        
         customer_notification_sent = telegram_service.notify_order_status_update(
             customer.telegram_id,
             order_number,
             'assigned',
-            driver.name
+            driver.name,
+            pickup_info  # Pass pickup info
         )
         
         if customer_notification_sent:
@@ -485,12 +666,18 @@ async def assign_driver_to_order(
     else:
         logger.warning(f"Customer has no Telegram ID, cannot send notification")
     
+    # Send notification to admin about driver assignment
+    admin_notification_sent = await notify_admin_order_status_update(
+        db, order_number, old_status, 'assigned', admin
+    )
+    
     # Create response with detailed notification status
     response_data = {
         "message": "Driver assigned successfully",
         "order_number": order_number,
         "driver_assigned": driver.name,
         "driver_telegram_id": driver.telegram_id,
+        "pickup_address_provided": bool(driver.pickup_address_id and order.delivery_or_pickup == 'pickup'),
         "notifications": {
             "driver": {
                 "sent": driver_notification_sent,
@@ -500,53 +687,15 @@ async def assign_driver_to_order(
             "customer": {
                 "sent": customer_notification_sent,
                 "telegram_id": customer.telegram_id if customer else None
+            },
+            "admin": {
+                "sent": admin_notification_sent
             }
         }
     }
     
     logger.info(f"Driver assignment completed: {response_data}")
     return response_data
-
-@router.post("/orders/{order_number}/status")
-async def update_order_status_with_notification(
-    order_number: str, 
-    status_data: dict, 
-    db: Session = Depends(get_db),
-    admin: str = Depends(get_current_admin)
-):
-    """Update order status and send notifications"""
-    order = db.query(models.Order).filter(models.Order.order_number == order_number).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    
-    new_status = status_data.get('status')
-    if not new_status:
-        raise HTTPException(status_code=400, detail="Status is required")
-    
-    # Update order status
-    from .admin_crud import update_order_status
-    updated_order = update_order_status(db, order_number, new_status, status_data.get('driver_id'))
-    
-    if not updated_order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    
-    # Send notification to customer if status change warrants it
-    customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
-    driver = db.query(models.Driver).filter(models.Driver.id == order.driver_id).first() if order.driver_id else None
-    
-    notification_sent = False
-    if customer and customer.telegram_id and new_status in ['out_for_delivery', 'delivered']:
-        notification_sent = telegram_service.notify_order_status_update(
-            customer.telegram_id,
-            order_number,
-            new_status,
-            driver.name if driver else None
-        )
-    
-    return {
-        "message": "Order status updated successfully",
-        "notification_sent": notification_sent
-    }
 
 @router.post("/test-telegram")
 async def test_telegram_notification(test_data: dict, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
@@ -784,24 +933,26 @@ async def update_order_status_with_notification(
     db: Session = Depends(get_db),
     admin: str = Depends(get_current_admin)
 ):
-    """Update order status and handle inventory"""
+    """Update order status and send notifications to customer and admin"""
     from .inventory_service import get_inventory_service
     
     order = db.query(models.Order).filter(models.Order.order_number == order_number).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     
-    new_status = status_data.get('status')
+    new_status = normalize_order_status(status_data.get('status'))
     if not new_status:
         raise HTTPException(status_code=400, detail="Status is required")
+    
+    old_status = order.status  # Store old status for notification
     
     inventory_service = get_inventory_service(db)
     
     # Handle inventory for status changes
-    if new_status == 'delivered' and order.assigned_driver_id:
+    if new_status == 'delivered' and order.driver_id:
         # Fulfill reservations and deduct from driver stock
         try:
-            inventory_service.fulfill_reservations(order.id, order.assigned_driver_id)
+            inventory_service.fulfill_reservations(order.id, order.driver_id)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Inventory fulfillment failed: {str(e)}")
     elif new_status in ['cancelled', 'expired']:
@@ -815,24 +966,34 @@ async def update_order_status_with_notification(
     if not updated_order:
         raise HTTPException(status_code=404, detail="Order not found")
     
+    # Send notifications
+    customer_notification_sent = False
+    admin_notification_sent = False
+    
     # Send notification to customer if status change warrants it
     customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
     driver = db.query(models.Driver).filter(models.Driver.id == order.driver_id).first() if order.driver_id else None
     
-    notification_sent = False
-    if customer and customer.telegram_id and new_status in ['out_for_delivery', 'delivered']:
-        from .telegram_service import telegram_service
-        notification_sent = telegram_service.notify_order_status_update(
+    if customer and customer.telegram_id and new_status in ['out_for_delivery', 'delivered', 'assigned']:
+        customer_notification_sent = telegram_service.notify_order_status_update(
             customer.telegram_id,
             order_number,
             new_status,
             driver.name if driver else None
         )
     
+    # Send notification to admin for ALL status changes
+    admin_notification_sent = await notify_admin_order_status_update(
+        db, order_number, old_status, new_status, admin
+    )
+    
     return {
         "message": "Order status updated successfully",
         "inventory_updated": new_status in ['delivered', 'cancelled', 'expired'],
-        "notification_sent": notification_sent
+        "notifications": {
+            "customer_sent": customer_notification_sent,
+            "admin_sent": admin_notification_sent
+        }
     }
 
 @router.delete("/menu/items/{item_id}/permanent")
@@ -1419,11 +1580,17 @@ async def confirm_btc_payment(
     """Manually confirm BTC 0-conf payment"""
     from .payment_service import get_payment_service
     
-    confirmed_by = confirmation_data.get('confirmed_by')  # Admin user ID
     notes = confirmation_data.get('notes', '')
     
-    if not confirmed_by:
-        raise HTTPException(status_code=400, detail="confirmed_by field is required")
+    # Find or create admin customer record (using telegram_id = 0 as admin identifier)
+    admin_customer = db.query(models.Customer).filter(models.Customer.telegram_id == 0).first()
+    if not admin_customer:
+        admin_customer = models.Customer(telegram_id=0, phone="admin")
+        db.add(admin_customer)
+        db.commit()
+        db.refresh(admin_customer)
+    
+    confirmed_by = admin_customer.id
     
     payment_service = get_payment_service(db)
     success = payment_service.confirm_btc_payment(order_number, confirmed_by, notes)
@@ -1445,6 +1612,50 @@ async def confirm_btc_payment(
         return {"message": f"BTC payment for order {order_number} confirmed successfully"}
     else:
         raise HTTPException(status_code=400, detail="Failed to confirm BTC payment")
+
+@router.post("/payments/mark-paid/{order_number}")
+async def mark_order_as_paid(
+    order_number: str,
+    confirmation_data: dict,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin)
+):
+    """Mark any order as paid (for cash, cashapp, etc.)"""
+    from .payment_service import get_payment_service
+    
+    notes = confirmation_data.get('notes', '')
+    
+    # Find or create admin customer record (using telegram_id = 0 as admin identifier)
+    admin_customer = db.query(models.Customer).filter(models.Customer.telegram_id == 0).first()
+    if not admin_customer:
+        admin_customer = models.Customer(telegram_id=0, phone="admin")
+        db.add(admin_customer)
+        db.commit()
+        db.refresh(admin_customer)
+    
+    confirmed_by = admin_customer.id
+    
+    payment_service = get_payment_service(db)
+    success = payment_service.mark_order_as_paid(order_number, confirmed_by, notes)
+    
+    if success:
+        # Send notification to customer
+        order = db.query(models.Order).filter(models.Order.order_number == order_number).first()
+        if order:
+            customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
+            if customer and customer.telegram_id:
+                from .telegram_service import telegram_service
+                payment_type_name = get_payment_label(order.payment_type)
+                telegram_service.send_message(
+                    customer.telegram_id,
+                    f"✅ <b>Payment Confirmed!</b>\n\n"
+                    f"Your {payment_type_name} payment for order #{order_number} has been confirmed.\n"
+                    f"Your order is now being processed! 🚀"
+                )
+        
+        return {"message": f"Payment for order {order_number} marked as paid successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Failed to mark order as paid")
 
 @router.get("/orders/{order_number}/payment-details")
 async def get_order_payment_details(
@@ -1521,13 +1732,26 @@ async def generate_btc_payment(
 
 @router.get("/pickup-addresses")
 async def get_pickup_addresses(
+    active_only: Optional[bool] = Query(None),
+    search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     admin: str = Depends(get_current_admin)
 ):
     """Get all pickup addresses"""
-    pickup_addresses = db.query(models.PickupAddress).filter(
-        models.PickupAddress.active == True
-    ).order_by(models.PickupAddress.name).all()
+    query = db.query(models.PickupAddress)
+
+    if active_only is not None:
+        query = query.filter(models.PickupAddress.active == active_only)
+
+    if search:
+        pattern = f"%{search.strip()}%"
+        query = query.filter(
+            (models.PickupAddress.name.ilike(pattern))
+            | (models.PickupAddress.address.ilike(pattern))
+            | (models.PickupAddress.instructions.ilike(pattern))
+        )
+
+    pickup_addresses = query.order_by(models.PickupAddress.name).all()
     
     return [
         {
@@ -1750,7 +1974,7 @@ async def get_customer_details(
     
     total_spent_result = db.query(func.sum(models.Order.total_cents)).filter(
         models.Order.customer_id == customer_id,
-        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed'])
+        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed', 'paid'])
     ).scalar() or 0
     
     recent_orders = db.query(models.Order).filter(
@@ -1762,9 +1986,15 @@ async def get_customer_details(
             "id": customer.id,
             "telegram_id": customer.telegram_id,
             "phone": customer.phone,
+            "display_name": customer.display_name,
+            "alias_username": customer.alias_username,
+            "alias_email": customer.alias_email,
+            "account_status": customer.account_status,
+            "invite_code": customer.invite.code if customer.invite else None,
             "verified": customer.verified_bool,
             "created_at": customer.created_at.isoformat(),
-            "default_address_id": customer.default_address_id
+            "default_address_id": customer.default_address_id,
+            "last_login_at": customer.last_login_at.isoformat() if customer.last_login_at else None,
         },
         "statistics": {
             "total_orders": total_orders,
@@ -1806,7 +2036,7 @@ async def get_payments_list(
 ):
     """Get list of payments with filters"""
     query = db.query(models.Order).filter(
-        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed', 'pending_btc', 'pending'])
+        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed', 'paid', 'pending_btc', 'pending'])
     )
     
     if payment_type:
@@ -1845,7 +2075,7 @@ async def get_payments_list(
         func.count(models.Order.id).label('total_count'),
         func.sum(models.Order.total_cents).label('total_amount')
     ).filter(
-        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed', 'pending_btc', 'pending'])
+        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed', 'paid', 'pending_btc', 'pending'])
     )
     
     if payment_type:
@@ -1898,6 +2128,7 @@ async def get_contact_info(db: Session = Depends(get_db), admin: str = Depends(g
         
         return {
             "welcome_message": contact_settings.welcome_message,
+            "welcome_photo_url": contact_settings.welcome_photo_url or "",
             "telegram_id": contact_settings.telegram_id,
             "telegram_username": contact_settings.telegram_username or "",
             "phone_number": contact_settings.phone_number or "",
@@ -1912,6 +2143,7 @@ async def get_contact_info(db: Session = Depends(get_db), admin: str = Depends(g
         # Return safe defaults in case of error
         return {
             "welcome_message": "Welcome to our delivery service! 🚀\n\nWe're happy to serve you. Use the menu below to browse our offerings and place your order.",
+            "welcome_photo_url": "",
             "telegram_id": None,
             "telegram_username": "",
             "phone_number": "",
@@ -1927,9 +2159,10 @@ async def update_welcome_message(
     db: Session = Depends(get_db),
     admin: str = Depends(get_current_admin)
 ):
-    """Update welcome message in database"""
+    """Update welcome message and photo in database"""
     try:
         welcome_message = welcome_data.get('welcome_message', '').strip()
+        welcome_photo_url = welcome_data.get('welcome_photo_url', '').strip()
         
         if not welcome_message:
             raise HTTPException(status_code=400, detail="Welcome message cannot be empty")
@@ -1951,17 +2184,19 @@ async def update_welcome_message(
         if admin_customer:
             contact_settings.updated_by = admin_customer.id
         
-        # Update welcome message
+        # Update welcome message and photo
         contact_settings.welcome_message = welcome_message
+        contact_settings.welcome_photo_url = welcome_photo_url if welcome_photo_url else None
         contact_settings.updated_at = datetime.now()
         
         db.commit()
         
-        logger.info(f"Welcome message updated by admin {admin}")
+        logger.info(f"Welcome message and photo updated by admin {admin}")
         
         return {
             "message": "Welcome message updated successfully",
             "welcome_message": welcome_message,
+            "welcome_photo_url": welcome_photo_url,
             "updated_at": contact_settings.updated_at.isoformat()
         }
         
@@ -2043,6 +2278,19 @@ async def update_contact_info(
                 detail="At least one contact method (Telegram ID, Telegram username, phone number, or email) is required"
             )
         
+        # Additional validation for admin notifications
+        if telegram_id:
+            try:
+                # Test if we can send a message to this Telegram ID
+                test_message = "🔔 <b>Admin Notifications Activated</b>\n\nYour Telegram ID has been configured to receive order status updates. You will receive notifications for all order status changes."
+                test_success = telegram_service.send_message(telegram_id, test_message)
+                
+                if not test_success:
+                    logger.warning(f"Could not send test message to Telegram ID {telegram_id}")
+                    # Don't fail the request, but log the warning
+            except Exception as e:
+                logger.warning(f"Test message failed for Telegram ID {telegram_id}: {e}")
+
         # Validate email format if provided
         if email_address and '@' not in email_address:
             raise HTTPException(status_code=400, detail="Invalid email address format")
@@ -2107,3 +2355,86 @@ async def update_contact_info(
         logger.error(f"Error updating contact info: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update contact information")
+
+async def notify_admin_order_status_update(
+    db: Session, 
+    order_number: str, 
+    old_status: str, 
+    new_status: str, 
+    updated_by_admin: str
+) -> bool:
+    """Send order status update notification to admin via Telegram"""
+    try:
+        # Get admin contact information
+        contact_settings = db.query(models.ContactSettings).first()
+        if not contact_settings or not contact_settings.telegram_id:
+            logger.warning("Admin Telegram ID not configured in ContactSettings")
+            return False
+        
+        # Get order details for the notification
+        order = db.query(models.Order).filter(models.Order.order_number == order_number).first()
+        if not order:
+            logger.error(f"Order {order_number} not found for admin notification")
+            return False
+        
+        customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
+        driver = db.query(models.Driver).filter(models.Driver.id == order.driver_id).first() if order.driver_id else None
+        
+        # Format order items
+        items_text = ""
+        total_amount = 0
+        for item in order.items:
+            quantity = item.get('quantity', 1)
+            item_total = item['price_cents'] * quantity
+            total_amount += item_total
+            items_text += f"• {item['name']} x{quantity} - ${item_total/100:.2f}\n"
+        
+        # Determine order type
+        order_type = "🚚 Delivery" if order.delivery_or_pickup == 'delivery' else "🏃 Pickup"
+        
+        # Status emoji mapping
+        status_emojis = {
+            'placed': '📝',
+            'assigned': '👤',
+            'out_for_delivery': '🚗',
+            'delivered': '✅',
+            'cancelled': '❌',
+            'expired': '⏰',
+            'scheduled': '📅'
+        }
+        
+        old_status_emoji = status_emojis.get(old_status, '📦')
+        new_status_emoji = status_emojis.get(new_status, '📦')
+        
+        # Create admin notification message
+        message = f"""
+{new_status_emoji} <b>ORDER STATUS UPDATED</b>
+
+📦 <b>Order #:</b> <code>{order_number}</code>
+💰 <b>Total Amount:</b> <b>${total_amount/100:.2f}</b>
+📍 <b>Type:</b> {order_type}
+🔄 <b>Status Change:</b> {old_status_emoji} {old_status} → {new_status_emoji} {new_status}
+
+👤 <b>Customer:</b> {customer.phone if customer and customer.phone else 'No phone provided'}
+👨‍💼 <b>Updated By:</b> {updated_by_admin}
+{f"🚗 <b>Driver:</b> {driver.name}" if driver else ""}
+
+📋 <b>Order Items:</b>
+{items_text}
+
+{f"📝 <b>Customer Notes:</b> {order.notes}" if order.notes else ""}
+        """.strip()
+        
+        # Send notification to admin
+        success = telegram_service.send_message(contact_settings.telegram_id, message)
+        
+        if success:
+            logger.info(f"✅ Admin notification sent for order {order_number} status change: {old_status} → {new_status}")
+        else:
+            logger.error(f"❌ Failed to send admin notification for order {order_number}")
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"💥 Error sending admin notification: {e}")
+        return False

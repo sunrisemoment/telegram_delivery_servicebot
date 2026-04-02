@@ -161,5 +161,40 @@ class APIClient:
             await self._session.close()
             self._session = None
 
+    async def register_driver(self, driver_data: Dict[str, Any]) -> Optional[Dict]:
+        """Register a new driver"""
+        return await self._request("POST", "/drivers/register", json=driver_data)
+
+    async def get_driver_by_telegram_id(self, telegram_id: int) -> Optional[Dict]:
+        """Get driver by Telegram ID"""
+        return await self._request("GET", f"/drivers/telegram/{telegram_id}")
+
+    async def get_driver_orders(self, driver_id: int) -> Optional[List[Dict]]:
+        """Get orders assigned to a driver"""
+        return await self._request("GET", f"/drivers/{driver_id}/orders")
+
+    async def update_order_status(self, order_number: str, status: str, driver_id: int = None) -> Optional[Dict]:
+        """Update order status"""
+        data = {"status": status}
+        if driver_id:
+            data["driver_id"] = driver_id
+        return await self._request("PUT", f"/orders/{order_number}/status", json=data)
+
+    async def get_order_status(self, order_number: str) -> Optional[Dict]:
+        """Get current order status"""
+        return await self._request("GET", f"/orders/{order_number}/status")
+
+    async def assign_driver_to_order(self, order_number: str, driver_id: int) -> Optional[Dict]:
+        """Assign driver to order"""
+        return await self._request("POST", f"/orders/{order_number}/assign", json={"driver_id": driver_id})
+    
+    async def update_driver_phone(self, driver_id: int, phone: str) -> Optional[Dict]:
+        """Update driver phone number"""
+        return await self._request("PUT", f"/drivers/{driver_id}/phone", json={"phone": phone})
+
+    async def update_driver_availability(self, driver_id: int, is_online: bool) -> Optional[Dict]:
+        """Update driver online/offline status."""
+        return await self._request("PUT", f"/drivers/{driver_id}/availability", json={"is_online": is_online})
+
 # Singleton instance
 api_client = APIClient()

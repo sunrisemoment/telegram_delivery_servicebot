@@ -20,6 +20,31 @@
                                     You can use HTML formatting. Use {{name}} for customer's first name if available.
                                 </small>
                             </div>
+
+                            <div class="form-group">
+                                <label for="welcomePhoto">Welcome Photo (Optional)</label>
+                                <div class="custom-file mb-2">
+                                    <input type="file" class="custom-file-input" id="welcomePhoto" 
+                                           accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+                                           onchange="handleWelcomePhotoSelect(event)">
+                                    <label class="custom-file-label" for="welcomePhoto">Choose photo...</label>
+                                </div>
+                                <small class="form-text text-muted">
+                                    Upload a photo to be displayed with the welcome message. Supported formats: JPEG, PNG, GIF, WebP
+                                </small>
+                                
+                                <!-- Photo Preview -->
+                                <div id="welcomePhotoPreviewContainer" style="display: none;" class="mt-3">
+                                    <div class="card" style="max-width: 400px;">
+                                        <img id="welcomePhotoPreview" class="card-img-top" style="width: 300px; height: 200px; object-fit: contain;" alt="Welcome Photo Preview">
+                                        <div class="card-body">
+                                            <button type="button" class="btn btn-danger btn-sm" onclick="removeWelcomePhoto()">
+                                                <i class="fas fa-trash"></i> Remove Photo
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
                             
                             <button type="button" class="btn btn-primary" onclick="saveWelcomeMessage()">
                                 <i class="fas fa-save"></i> Save Welcome Message

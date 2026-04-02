@@ -1,8 +1,20 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+import os
+
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+
+
+def _get_mini_app_url():
+    mini_app_url = os.getenv("MINI_APP_URL")
+    if mini_app_url:
+        return mini_app_url.rstrip("/")
+
+    api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+    return f"{api_base_url}/miniapp"
 
 def get_main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
+            [KeyboardButton(text="📱 Open Mini App", web_app=WebAppInfo(url=_get_mini_app_url()))],
             [KeyboardButton(text="🛍️ Order"), KeyboardButton(text="🛒 Review Cart")],
             [KeyboardButton(text="📞 Contact Support")]
         ],
@@ -33,6 +45,10 @@ def get_payment_methods_keyboard():
             [
                 InlineKeyboardButton(text="₿ Bitcoin", callback_data="payment:btc"),
                 InlineKeyboardButton(text="💵 Cash", callback_data="payment:cash"),
+            ],
+            [
+                InlineKeyboardButton(text="🍎 Apple Cash", callback_data="payment:apple_cash"),
+                InlineKeyboardButton(text="💚 Cash App", callback_data="payment:cashapp"),
             ],
             [InlineKeyboardButton(text="⬅️ Back", callback_data="payment:back")]
         ]

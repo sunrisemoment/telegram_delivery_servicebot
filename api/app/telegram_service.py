@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 token = os.getenv("TELEGRAM_BOT_TOKEN")
 
-print(f"Token: {token}")
 if token is None:
     print("TELEGRAM_BOT_TOKEN environment variable is not set!")
 
@@ -109,8 +108,8 @@ class TelegramService:
 
 <b>Available Commands:</b>
 /start_driver - Activate driver mode
-/outside {order.order_number} - Mark as arrived
-/complete {order.order_number} - Mark as delivered
+/outside_{order.order_number} - Mark as arrived
+/complete_{order.order_number} - Mark as delivered
             """.strip()
             
             logger.info(f"Sending assignment notification to driver {driver.name} (TG: {driver_telegram_id})")
@@ -127,11 +126,11 @@ class TelegramService:
             logger.error(f"💥 Error in notify_driver_assignment: {e}")
             return False
     
-    def notify_order_status_update(self, customer_telegram_id: int, order_number: str, status: str, driver_name: str = None) -> bool:
+    def notify_order_status_update(self, customer_telegram_id: int, order_number: str, status: str, driver_name: str = None, additional_info: str = "") -> bool:
         """Notify customer about order status update"""
         try:
             status_messages = {
-                'assigned': f"🚗 Driver <b>{driver_name}</b> has been assigned to your order and is on the way!",
+                'assigned': f"🚗 Driver <b>{driver_name}</b> has been assigned to your order!{additional_info}",
                 'out_for_delivery': "📦 Your order is out for delivery and will arrive soon!",
                 'delivered': "✅ Your order has been delivered! Thank you for choosing our service! 🎉",
                 'scheduled': "⏰ Your order has been scheduled for delivery."
@@ -140,11 +139,11 @@ class TelegramService:
             message = status_messages.get(status, f"Order status updated to: {status}")
             
             full_message = f"""
-📦 <b>Order Update: #{order_number}</b>
+    📦 <b>Order Update: #{order_number}</b>
 
-{message}
+    {message}
 
-Thank you for your order! 🙏
+    Thank you for your order! 🙏
             """.strip()
             
             logger.info(f"Sending status update to customer {customer_telegram_id} for order {order_number}")

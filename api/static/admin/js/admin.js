@@ -96,6 +96,7 @@ function getTabDisplayName(tabName) {
         'pickup_locations': 'Pickup Locations',
         'orders': 'Orders',
         'customers': 'Customers',
+        'invites': 'Invites',
         'drivers': 'Drivers',
         'menu': 'Menu',
         'inventory': 'Inventory',

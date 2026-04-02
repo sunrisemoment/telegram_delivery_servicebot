@@ -17,8 +17,11 @@ import pytz
 import os
 import time
 import asyncio
+from ..utils import proxy_image_url
 
 logger = logging.getLogger(__name__)
+
+BASE_URL = os.getenv("API_BASE_URL")
 
 router = Router()
 
@@ -50,12 +53,45 @@ async def cmd_start(message: Message):
 
     contact_settings = await api_client.get_welcome_message()
     if not contact_settings:
-        await message.answer("Welcome to our delivery service! 🛍️\n\nUse the buttons below to get started:", reply_markup=get_main_menu())
+        await message.answer(
+            "Welcome to our delivery service! 🛍️\n\n"
+            "Use the Mini App for the invite-only experience, or the chat buttons below for the legacy flow.",
+            reply_markup=get_main_menu()
+        )
         return
     
     welcome_message = contact_settings.get('welcome_message', "Welcome to our delivery service! 🛍️")
+    welcome_photo_url = contact_settings.get('welcome_photo_url', '')
+    
+    # Send photo with short caption, then full message
+    # (Telegram caption limit is 1024 characters)
+    try:
+        logger.info(f"Attempting to send welcome photo: {welcome_photo_url}")
+        if welcome_photo_url:
+            photo_url = proxy_image_url(BASE_URL + welcome_photo_url)
+            # Send photo with short caption
+            await message.answer_photo(
+                photo=photo_url,
+                caption=""
+            )
+        
+        
+        # Send full message separately
+        await message.answer(
+            welcome_message + "\n\nUse the Mini App for the invite-only experience, or the chat buttons below for the legacy flow.",
+            reply_markup=get_main_menu()
+        )
+        
+        logger.info("✅ Welcome photo and message sent successfully!")
+        return
+    except Exception as e:
+        logger.error(f"❌ Failed to send welcome photo: {e}")
+        logger.error(f"Error type: {type(e).__name__}")
+        # Fall through to text-only message
+    
+    # Text-only message (no photo or photo failed)
     await message.answer(
-        welcome_message + "\n\nUse the buttons below to get started:",
+        welcome_message + "\n\nUse the Mini App for the invite-only experience, or the chat buttons below for the legacy flow.",
         reply_markup=get_main_menu()
     )
 
@@ -94,9 +130,9 @@ async def process_delivery_type(callback: CallbackQuery, state: FSMContext):
                 await state.set_state(OrderStates.waiting_for_address)
                 await ask_for_address(callback.message)
         else:
-            # Pickup - show pickup addresses
-            await state.set_state(OrderStates.waiting_for_pickup_address)
-            await show_pickup_addresses(callback.message, state)
+            # Pickup - show instructions and go to menu
+            await state.set_state(OrderStates.waiting_for_menu_selection)
+            await show_pickup_instructions(callback.message, state)
     else:
         # New customer or no phone - ask for phone first
         await state.set_state(OrderStates.waiting_for_phone)
@@ -134,31 +170,23 @@ async def get_pickup_locations() -> List[Dict]:
         logger.error(f"Error getting pickup addresses: {e}")
         return []
 
-async def show_pickup_addresses(message: Message, state: FSMContext):
-    """Show available pickup addresses for selection"""
-    try:
-        pickup_addresses = await get_pickup_locations()
-        
-        if not pickup_addresses:
-            await message.answer(
-                "⚠️ No pickup locations available at the moment. Please try delivery or contact support.",
-                reply_markup=get_main_menu()
-            )
-            return
-        
-        await message.answer(
-            "📍 <b>Select Pickup Location:</b>\n\n"
-            "Choose from our available pickup points:",
-            reply_markup=get_pickup_addresses_keyboard(pickup_addresses),
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error loading pickup addresses: {e}")
-        await message.answer(
-            "❌ Error loading pickup locations. Please try delivery or contact support.",
-            reply_markup=get_main_menu()
-        )
+async def show_pickup_instructions(message: Message, state: FSMContext):
+    """Show instructions for pickup orders"""
+    await message.answer(
+        "📦 <b>Pickup Order Instructions</b>\n\n"
+        "1. Place your order and select payment method\n"
+        "2. Once a driver is assigned to your order, you'll receive:\n"
+        "   - Pickup location address\n"
+        "   - Driver's contact information\n"
+        "   - Specific pickup instructions\n\n"
+        "Let's proceed with your order! 🛍️",
+        reply_markup=get_main_menu(),
+        parse_mode="HTML"
+    )
+    
+    # Go directly to menu selection
+    await state.set_state(OrderStates.waiting_for_menu_selection)
+    await show_menu_categories_handler(message, state)
 
 async def ask_for_address(message: Message):
     """Ask customer for their address"""
@@ -235,54 +263,7 @@ async def ask_for_address_selection(message: Message, telegram_id: int):
         )
         await ask_for_address(message)
 
-@router.callback_query(OrderStates.waiting_for_pickup_address, F.data.startswith("pickup_address:"))
-async def process_pickup_address_selection(callback: CallbackQuery, state: FSMContext):
-    """Process pickup address selection"""
-    pickup_address_id = callback.data.split(":")[1]
-    
-    if pickup_address_id == "back":
-        # Go back to delivery type selection
-        await callback.message.answer(
-            "Choose delivery type:",
-            reply_markup=get_delivery_type_keyboard()
-        )
-        return
-    
-    try:
-        # Get pickup addresses to find the selected one
-        pickup_addresses = await get_pickup_locations()
-        selected_address = next(
-            (addr for addr in pickup_addresses if str(addr['id']) == pickup_address_id), 
-            None
-        )
-        
-        if selected_address:
-            # Store pickup address in state
-            await state.update_data(
-                pickup_address_id=selected_address['id'],
-                pickup_address_label=selected_address['name'],
-                pickup_address_text=selected_address['address']
-            )
-            
-            await state.set_state(OrderStates.waiting_for_menu_selection)
-            await callback.message.answer(
-                f"✅ <b>Pickup location selected:</b>\n"
-                f"<b>{selected_address['name']}</b>\n"
-                f"{selected_address['address']}\n\n"
-                "Now let's browse the menu and add items to your order!",
-                reply_markup=get_main_menu(),
-                parse_mode="HTML"
-            )
-            await show_menu_categories_handler(callback.message, state)
-        else:
-            await callback.answer("❌ Pickup location not found")
-            
-    except Exception as e:
-        logger.error(f"Error selecting pickup address: {e}")
-        await callback.message.answer(
-            "❌ Error selecting pickup location. Please try again.",
-            reply_markup=get_main_menu()
-        )
+# Remove the pickup address selection handler since we're not showing pickup locations initially
 
 # 1. Handle back button first
 @router.message(OrderStates.waiting_for_address, F.text == "⬅️ Back")
@@ -704,61 +685,90 @@ async def show_category_items(callback: CallbackQuery, category: str):
         await callback.answer("No items in this category")
         return
     
-    keyboard = []
+    # Edit the original message to show category header
+    await callback.message.edit_text(
+        f"🍽️ {category}:\n\nChoose an item to add to your cart:"
+    )
+    
+    # Send each item as a separate photo message with add button
     for item in category_items:
         price = f"${item['price_cents'] / 100:.2f}"
         status_emoji = {
             'in_stock': '🟢',
-            'low_stock': '🟡',
+            'low_stock': '🟡', 
             'out_of_stock': '🔴'
         }.get(item.get('status', 'in_stock'), '⚪')
         
-        # Show availability info
-        available_qty = item.get('available_qty', 0)
-        stock_info = ""
+        # Create caption with item name, price, and description
+        caption = f"<b>{item['name']}</b>\n\n"
+        caption += f"💰 <b>Price:</b> {price}\n"
+        caption += f"📝 {item['description']}"
+        
+        # Add stock info to caption
         if item.get('status') == 'out_of_stock':
-            stock_info = " - 🔴 Out of Stock"
+            caption += "\n🔴 Out of Stock"
         elif item.get('status') == 'low_stock':
-            stock_info = f" - 🟡 Only {available_qty} left"
+            caption += f"\n🟡 Only {item.get('available_qty', 0)} left"
         
-        button_text = f"{status_emoji} {item['name']} - {price}{stock_info}"
-        
-        # Only make items clickable if they're in stock
+        # Create inline keyboard
+        keyboard = []
         if item.get('status') != 'out_of_stock':
+            # Clean the item name for callback data (remove special chars, limit length)
+            clean_item_name = "".join(c for c in item['name'] if c.isalnum() or c in (' ', '-', '_')).strip()
+            clean_item_name = clean_item_name[:20]  # Limit length
+            
             keyboard.append([
                 InlineKeyboardButton(
-                    text=button_text,
-                    callback_data=f"item:{item['id']}:{item['name']}"
+                    text="🛒 Add to Cart",
+                    callback_data=f"item:{item['id']}"  # Only use ID, not name
                 )
             ])
         else:
-            # Show disabled state for out of stock items
             keyboard.append([
                 InlineKeyboardButton(
-                    text=button_text,
+                    text="🔴 Out of Stock", 
                     callback_data="out_of_stock"
                 )
             ])
-    
-    # Add back buttons
-    keyboard.append([
-        InlineKeyboardButton(text="⬅️ Back to Categories", callback_data="category:back"),
-        InlineKeyboardButton(text="↩️ Back to Delivery Type", callback_data="category:back_to_delivery")
-    ])
-    
-    try:
-        await callback.message.edit_text(
-            f"🍽️ {category}:\n\nChoose an item to add to your cart:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=keyboard)
+        
+        # Send photo if available
+        photo_url = item.get('photo_url')
+        if photo_url:
+            try:
+                # Clean the URL and ensure it's properly formatted
+                clean_photo_url = photo_url.strip()
+                logger.info(f"Sending photo: {proxy_image_url(BASE_URL + clean_photo_url)}")
+                # Send photo inline without link in caption
+                await callback.message.answer_photo(
+                    photo=proxy_image_url(BASE_URL + clean_photo_url),
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+                continue  # Skip text version if photo sent successfully
+            except Exception as e:
+                logger.warning(f"Failed to send photo for {item['name']}: {e}")
+                # Fall through to text version
+        
+        # Fallback: send text message if no photo or photo failed
+        await callback.message.answer(
+            caption,
+            reply_markup=reply_markup,
+            parse_mode="HTML"
         )
-    except Exception as e:
-        if "not modified" in str(e).lower():
-            await callback.message.answer(
-                f"🍽️ {category}:\n\nChoose an item to add to your cart:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-            )
-        else:
-            raise
+    
+    # Add navigation buttons at the end
+    navigation_keyboard = [
+        [InlineKeyboardButton(text="⬅️ Back to Categories", callback_data="category:back")],
+        [InlineKeyboardButton(text="↩️ Back to Delivery Type", callback_data="category:back_to_delivery")]
+    ]
+    
+    await callback.message.answer(
+        "Browse items above and use the buttons to add to cart:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=navigation_keyboard)
+    )
 
 @router.callback_query(F.data == "out_of_stock")
 async def handle_out_of_stock(callback: CallbackQuery):
@@ -911,7 +921,7 @@ async def process_order_finish(callback: CallbackQuery, state: FSMContext):
     # For now, show estimated summary
     estimated_delivery_fee = 0
     if delivery_type == 'delivery':
-        estimated_delivery_fee = 1000  # Base estimate for display
+        estimated_delivery_fee = 1500  # Base estimate for display
     
     total_estimate = subtotal_cents + estimated_delivery_fee
     
@@ -929,155 +939,91 @@ async def process_order_finish(callback: CallbackQuery, state: FSMContext):
     
     await callback.message.answer(cart_text)
     
-    # Show available time slots
-    slots = get_available_slots()
-    await state.set_state(OrderStates.waiting_for_slot_selection)
+    # Calculate final delivery fee for delivery orders
+    final_delivery_fee = 0
+    delivery_zone = 'Pickup'
+    
+    if delivery_type == 'delivery':
+        # Prepare order data for delivery fee calculation
+        order_data = {
+            'customer_id': callback.from_user.id,
+            'items': cart_items,
+            'subtotal_cents': subtotal_cents,
+            'delivery_or_pickup': delivery_type,
+            'delivery_address_text': data.get('delivery_address'),
+            'delivery_address_id': data.get('delivery_address_id'),
+            'calculate_delivery_fee_only': True
+        }
+        
+        try:
+            # Call API to calculate actual delivery fee
+            fee_result = await api_client.calculate_delivery_fee(order_data)
+            
+            if fee_result and 'delivery_fee_cents' in fee_result:
+                final_delivery_fee = fee_result['delivery_fee_cents']
+                delivery_zone = fee_result.get('delivery_zone', 'Standard')
+            else:
+                final_delivery_fee = 1500
+                delivery_zone = 'Standard'
+                logger.warning("Failed to get delivery fee from API, using fallback")
+        except Exception as e:
+            logger.error(f"Error calculating delivery fee: {e}")
+            final_delivery_fee = 1500
+            delivery_zone = 'Standard'
+    
+    total_cents = subtotal_cents + final_delivery_fee
+    
+    # Store final amounts in state
+    await state.update_data(
+        subtotal_cents=subtotal_cents,
+        delivery_fee_cents=final_delivery_fee,
+        total_cents=total_cents,
+        delivery_zone=delivery_zone
+    )
+    
+    # Show final summary
+    summary_text = "📋 Final Order Summary:\n\n"
+    for item in cart_items:
+        quantity = item.get('quantity', 1)
+        item_total = item['price_cents'] * quantity
+        summary_text += f"• {item['name']} x{quantity} - ${item_total / 100:.2f}\n"
+        
+    summary_text += f"\n💰 Subtotal: ${subtotal_cents / 100:.2f}"
+    if delivery_type == 'delivery':
+        summary_text += f"\n🚚 Delivery Fee (Flat Rate): ${final_delivery_fee / 100:.2f}"
+    summary_text += f"\n💵 Total: ${total_cents / 100:.2f}"
+    
+    await callback.message.answer(summary_text, parse_mode="HTML")
+    
+    # Skip time slot selection and go directly to payment method
+    await state.set_state(OrderStates.waiting_for_payment_method)
+    
+    # Get BTC discount percentage if available
+    btc_discount = 0
+    settings = await api_client.get_btc_discount()
+    if settings:
+        btc_discount = settings.get('btc_discount_percent', 0)
+
+    payment_message = "Select payment method:"
+    if btc_discount > 0:
+        discounted_total = total_cents * (100 - btc_discount) / 100
+        payment_message = (
+            f"💡 <b>Bitcoin Payment Discount Available!</b>\n"
+            f"Pay with BTC and get {btc_discount}% off!\n"
+            f"Regular price: ${total_cents/100:.2f}\n"
+            f"BTC price: ${discounted_total/100:.2f}\n"
+            f"You save: ${(total_cents - discounted_total)/100:.2f}\n\n"
+            "Select payment method:"
+        )
+
+    # Show payment methods
     await callback.message.answer(
-        "Select delivery time:",
-        reply_markup=get_slots_keyboard(slots)
+        payment_message,
+        reply_markup=get_payment_methods_keyboard(),
+        parse_mode="HTML"
     )
 
-@router.callback_query(OrderStates.waiting_for_slot_selection, F.data.startswith("slot:"))
-async def process_slot_selection(callback: CallbackQuery, state: FSMContext):
-    """Process slot selection and calculate final delivery fee"""
-    
-    # Check if this is the back button
-    if callback.data == "slot:back":
-        await callback.message.delete()
-        await show_cart_review(callback, state)
-        return
-
-    try:
-        parts = callback.data.split(":")
-        slot_utc = ":".join(parts[1:])
-        await state.update_data(delivery_slot_utc=slot_utc)
-        
-        # Get all order data
-        data = await state.get_data()
-        delivery_type = data.get('delivery_type')
-        cart_items = data.get('items', [])
-        subtotal_cents = sum(item['price_cents'] * item.get('quantity', 1) for item in cart_items)
-        
-        # Calculate final delivery fee via API for delivery orders
-        final_delivery_fee = 0
-        delivery_zone = 'Pickup'
-        
-        if delivery_type == 'delivery':
-            # Prepare order data for delivery fee calculation
-            order_data = {
-                'customer_id': callback.from_user.id,
-                'items': cart_items,
-                'subtotal_cents': subtotal_cents,
-                'delivery_or_pickup': delivery_type,
-                'delivery_address_text': data.get('delivery_address'),
-                'delivery_address_id': data.get('delivery_address_id'),
-                'calculate_delivery_fee_only': True  # Flag to only calculate fee
-            }
-            
-            try:
-                # Call API to calculate actual delivery fee
-                fee_result = await api_client.calculate_delivery_fee(order_data)
-                
-                if fee_result and 'delivery_fee_cents' in fee_result:
-                    final_delivery_fee = fee_result['delivery_fee_cents']
-                    delivery_zone = fee_result.get('delivery_zone', 'Standard')
-                else:
-                    # Fallback if API call fails
-                    final_delivery_fee = 1000
-                    delivery_zone = 'Standard'
-                    logger.warning("Failed to get delivery fee from API, using fallback")
-            except Exception as e:
-                logger.error(f"Error calculating delivery fee: {e}")
-                final_delivery_fee = 1000
-                delivery_zone = 'Standard'
-        
-        total_cents = subtotal_cents + final_delivery_fee
-        
-        # Show final order summary with actual delivery fee
-        summary_text = "📋 Final Order Summary:\n\n"
-        # Add time slot to summary
-        if slot_utc:
-            try:
-                utc_zone = pytz.utc
-                et_zone = pytz.timezone('America/New_York')
-                
-                # Parse and format the selected time
-                utc_time = datetime.fromisoformat(slot_utc.replace('Z', '+00:00'))
-                utc_time = utc_zone.localize(utc_time) if utc_time.tzinfo is None else utc_time
-                et_time = utc_time.astimezone(et_zone)
-                
-                hour_12 = et_time.hour % 12
-                if hour_12 == 0:
-                    hour_12 = 12
-                am_pm = "AM" if et_time.hour < 12 else "PM"
-                
-                today = datetime.now(et_zone).date()
-                if et_time.date() == today:
-                    day_prefix = "Today"
-                elif et_time.date() == today + timedelta(days=1):
-                    day_prefix = "Tomorrow"
-                else:
-                    day_prefix = et_time.strftime("%A")
-                
-                time_display = f"{day_prefix} at {hour_12}:{et_time.minute:02d} {am_pm} ET"
-                summary_text += f"🕐 <b>Time Slot:</b> {time_display}\n\n"
-                
-            except Exception as e:
-                logger.error(f"Error formatting time for summary: {e}")
-                summary_text += f"🕐 <b>Time Slot:</b> {slot_utc}\n\n"
-
-        for item in cart_items:
-            quantity = item.get('quantity', 1)
-            item_total = item['price_cents'] * quantity
-            summary_text += f"• {item['name']} x{quantity} - ${item_total / 100:.2f}\n"
-            
-        summary_text += f"\n💰 Subtotal: ${subtotal_cents / 100:.2f}"
-        if delivery_type == 'delivery':
-            summary_text += f"\n🚚 Delivery Fee ({delivery_zone}): ${final_delivery_fee / 100:.2f}"
-        summary_text += f"\n💵 Total: ${total_cents / 100:.2f}"
-
-        # Store final amounts in state
-        await state.update_data(
-            subtotal_cents=subtotal_cents,
-            delivery_fee_cents=final_delivery_fee,
-            total_cents=total_cents,
-            delivery_zone=delivery_zone
-        )
-
-        await callback.message.answer(summary_text, parse_mode="HTML")
-        await state.set_state(OrderStates.waiting_for_payment_method)
-        
-        # Get BTC discount percentage if available
-        btc_discount = 0
-        settings = await api_client.get_btc_discount()
-        if settings:
-            btc_discount = settings.get('btc_discount_percent', 0)
-
-        payment_message = "Select payment method:"
-        if btc_discount > 0:
-            discounted_total = total_cents * (100 - btc_discount) / 100
-            payment_message = (
-                f"💡 <b>Bitcoin Payment Discount Available!</b>\n"
-                f"Pay with BTC and get {btc_discount}% off!\n"
-                f"Regular price: ${total_cents/100:.2f}\n"
-                f"BTC price: ${discounted_total/100:.2f}\n"
-                f"You save: ${(total_cents - discounted_total)/100:.2f}\n\n"
-                "Select payment method:"
-            )
-
-        # Show payment methods
-        await callback.message.answer(
-            payment_message,
-            reply_markup=get_payment_methods_keyboard(),
-            parse_mode="HTML"
-        )
-        
-    except Exception as e:
-        logger.error(f"Error in slot selection: {e}")
-        await callback.message.answer(
-            "❌ Error calculating delivery fee. Please try again or contact support."
-        )
-        await state.set_state(OrderStates.waiting_for_slot_selection)
+# Slot selection removed - orders are now processed immediately
 
 @router.callback_query(OrderStates.waiting_for_payment_method, F.data.startswith("payment:"))
 async def process_payment_method(callback: CallbackQuery, state: FSMContext):
@@ -1085,13 +1031,8 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
     payment_method = callback.data.split(":")[1]
     
     if payment_method == "back":
-        # Go back to slot selection
-        await state.set_state(OrderStates.waiting_for_slot_selection)
-        slots = get_available_slots()
-        await callback.message.answer(
-            "Select delivery time:",
-            reply_markup=get_slots_keyboard(slots)
-        )
+        # Go back to cart review
+        await show_cart_review(callback, state)
         return
     
     data = await state.get_data()
@@ -1108,15 +1049,9 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
         await ask_for_address_selection(callback.message, callback.from_user.id)
         return
     
-    if delivery_type == 'pickup' and not data.get('pickup_address_id'):
-        await callback.message.answer(
-            "❌ <b>Pickup location required!</b>\n\n"
-            "Please select a pickup location before completing the order.",
-            parse_mode="HTML"
-        )
-        await state.set_state(OrderStates.waiting_for_pickup_address)
-        await show_pickup_addresses(callback.message, state)
-        return
+    if delivery_type == 'pickup':
+        # Skip pickup location check since it will be assigned with driver
+        pass
     
     # Create final order via API with actual delivery fee
     order_data = {
@@ -1126,8 +1061,7 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
         'delivery_fee_cents': data.get('delivery_fee_cents', 0),
         'total_cents': data.get('total_cents', 0),
         'delivery_or_pickup': delivery_type,
-        'payment_type': payment_method,
-        'delivery_slot_et': data.get('delivery_slot_utc')
+        'payment_type': payment_method
     }
     
     # Add address information for delivery orders
@@ -1193,101 +1127,71 @@ async def process_payment_method(callback: CallbackQuery, state: FSMContext):
             "Please try again or contact support."
         )
 
+async def handle_pickup_notification(order_number: str, driver_id: int, message: Message):
+    """Handle pickup address notification when driver is assigned"""
+    try:
+        # Get driver's pickup address from API
+        driver_data = await api_client.get_driver_pickup_address(driver_id)
+        if not driver_data or 'pickup_address' not in driver_data:
+            return
+            
+        pickup_address = driver_data['pickup_address']
+        driver_name = driver_data.get('name', 'Your driver')
+        
+        # Send notification with pickup details
+        await message.answer(
+            f"🎉 <b>Pickup Details Updated!</b>\n\n"
+            f"Order #{order_number} has been assigned to {driver_name}.\n\n"
+            f"📍 <b>Pickup Location:</b>\n"
+            f"<b>{pickup_address['name']}</b>\n"
+            f"{pickup_address['address']}\n\n"
+            f"🕐 Please come to this location at your selected pickup time.\n"
+            f"📱 {driver_name} will be your pickup contact.\n\n"
+            f"ℹ️ <b>Additional Instructions:</b>\n"
+            f"{pickup_address.get('instructions', 'No special instructions')}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error sending pickup notification: {e}")
+
 async def generate_order_confirmation(data: dict, order_number: str, payment_method: str, 
                                    actual_delivery_fee: float, payment_url: str = None, 
                                    needs_confirmation: bool = False) -> str:
-    """Generate order confirmation message with actual delivery fee"""
+    """Generate order confirmation message with new format"""
     delivery_type = data.get('delivery_type', 'delivery')
     address = data.get('delivery_address', 'Not specified')
-    pickup_address = data.get('pickup_address_text', 'Not specified')
-    pickup_label = data.get('pickup_address_label', 'Pickup Location')
     subtotal = data.get('subtotal_cents', 0) / 100
     delivery_fee = actual_delivery_fee
     total = data.get('total_cents', 0) / 100
-    delivery_zone = data.get('delivery_zone', 'Standard')
     
-    # Get and format the selected time slot
-    delivery_slot_utc = data.get('delivery_slot_utc')
-    time_slot_display = "Not specified"
+    # Format payment method name
+    payment_method_name = {
+        'btc': 'Bitcoin',
+        'cash': 'Cash',
+        'apple_cash': 'Apple Cash',
+        'cashapp': 'Cash App'
+    }.get(payment_method, payment_method.upper())
     
-    if delivery_slot_utc:
-        try:
-            # Parse UTC time and convert to ET for display
-            from datetime import datetime
-            import pytz
-            
-            utc_zone = pytz.utc
-            et_zone = pytz.timezone('America/New_York')
-            
-            # Parse the UTC time
-            utc_time = datetime.fromisoformat(delivery_slot_utc.replace('Z', '+00:00'))
-            utc_time = utc_zone.localize(utc_time) if utc_time.tzinfo is None else utc_time
-            
-            # Convert to ET
-            et_time = utc_time.astimezone(et_zone)
-            
-            # Format for display
-            hour_12 = et_time.hour % 12
-            if hour_12 == 0:
-                hour_12 = 12
-            am_pm = "AM" if et_time.hour < 12 else "PM"
-            
-            # Check if it's today or tomorrow
-            from datetime import date
-            today = datetime.now(et_zone).date()
-            if et_time.date() == today:
-                day_prefix = "Today"
-            elif et_time.date() == today + timedelta(days=1):
-                day_prefix = "Tomorrow"
-            else:
-                day_prefix = et_time.strftime("%A")
-            
-            time_slot_display = f"{day_prefix} at {hour_12}:{et_time.minute:02d} {am_pm} ET"
-            
-        except Exception as e:
-            logger.error(f"Error formatting time slot: {e}")
-            # Fallback to raw display
-            time_slot_display = delivery_slot_utc
-    
+    # Build the message in the new format
     message = f"🎉 <b>Order #{order_number} Placed Successfully!</b>\n\n"
     message += f"📦 <b>Type:</b> {delivery_type.capitalize()}\n"
-    message += f"🕐 <b>Time Slot:</b> {time_slot_display}\n"
     message += f"💰 <b>Subtotal:</b> ${subtotal:.2f}\n"
     
     if delivery_type == 'delivery':
-        message += f"🚚 <b>Delivery Fee ({delivery_zone}):</b> ${delivery_fee:.2f}\n"
+        message += f"🚚 <b>Delivery Fee (Flat Rate):</b> ${delivery_fee:.2f}\n"
         message += f"📍 <b>Delivery Address:</b>\n{address}\n\n"
-    else:
-        message += f"📍 <b>Pickup Location:</b>\n{pickup_label}: {pickup_address}\n\n"
-
-    # Add discount information for BTC payments
-    if payment_method == 'btc':
-        settings = await api_client.get_btc_discount()
-        if settings:
-            btc_discount = settings.get('btc_discount_percent', 0)
-            if btc_discount > 0:
-                discounted_total = total * (100 - btc_discount) / 100
-                savings = total - discounted_total
-                message += f"💰 <b>Original Price:</b> ${total:.2f}\n"
-                message += f"🎉 <b>BTC Discount:</b> {btc_discount}%\n"
-                message += f"💵 <b>Final Price:</b> <b>${discounted_total:.2f}</b>\n"
-                message += f"✨ <b>You Save:</b> ${savings:.2f}\n"
-            else:
-                message += f"💵 <b>Total Amount:</b> <b>${total:.2f}</b>\n"
-    else:
-        message += f"💵 <b>Total Amount:</b> <b>${total:.2f}</b>\n"
     
-    message += f"💳 <b>Payment Method:</b> {payment_method.upper()}\n"
+    message += f"💵 <b>Total Amount:</b> ${total:.2f}\n"
+    message += f"💳 <b>Payment Method:</b> {payment_method_name}\n"
     
     if delivery_type == 'delivery':
         message += f"📍 <b>Delivery Address:</b>\n{address}\n\n"
     
-    if payment_method == 'btc' and needs_confirmation:
-        message += "⏳ <b>Payment Status:</b> Waiting for BTC confirmation\n\n"
-        message += "Your order has been placed but requires payment confirmation. "
-        message += "We'll notify you when your payment is confirmed and order is processed! 🚀"
-    else:
-        message += "Your items have been reserved! We'll notify you when your order is ready! 🚀"
+    message += "⏳ <b>Payment Status:</b> Awaiting payment approval\n\n"
+    message += "Your order has been placed! \n\n"
+    message += "<b>ORDER WILL NOT BE HANDED OVER OR DROPPED OFF WITHOUT PAYMENT CONFIRMATION UNLESS PAYING CASH OR YOU ASKED @HWCUSTOMERSERVICE DIRECTLY FOR A FRONT ! NO EXCEPTIONS! YOU WILL RECEIVE A NOTIFICATION WHEN THE PAYMENT HAS BEEN RECEIVED!</b> \n\n"
+    message += "CONTACT @HWDISPATCH for questions regarding delivery.\n\n"
+    message += "We'll notify you when your order is assigned to a driver! 🚀"
     
     return message
 
@@ -1309,7 +1213,7 @@ async def process_phone_contact(message: Message, state: FSMContext):
     
     await state.update_data(phone=formatted_phone)
     
-    # Check delivery type and ask for address if needed
+    # Check delivery type and handle next step
     data = await state.get_data()
     delivery_type = data.get('delivery_type')
     
@@ -1317,9 +1221,8 @@ async def process_phone_contact(message: Message, state: FSMContext):
         await state.set_state(OrderStates.waiting_for_address)
         await ask_for_address_selection(message, message.from_user.id)
     else:
-        # For pickup, show pickup addresses
-        await state.set_state(OrderStates.waiting_for_pickup_address)
-        await show_pickup_addresses(message, state)
+        # For pickup, show instructions and go to menu
+        await show_pickup_instructions(message, state)
 
 @router.message(OrderStates.waiting_for_phone)
 async def process_phone_text(message: Message, state: FSMContext):
@@ -1339,7 +1242,7 @@ async def process_phone_text(message: Message, state: FSMContext):
     
     await state.update_data(phone=formatted_phone)
     
-    # Check delivery type and ask for address if needed
+    # Check delivery type and handle next step
     data = await state.get_data()
     delivery_type = data.get('delivery_type')
     
@@ -1347,9 +1250,8 @@ async def process_phone_text(message: Message, state: FSMContext):
         await state.set_state(OrderStates.waiting_for_address)
         await ask_for_address_selection(message, message.from_user.id)
     else:
-        # For pickup, show pickup addresses
-        await state.set_state(OrderStates.waiting_for_pickup_address)
-        await show_pickup_addresses(message, state)
+        # For pickup, show instructions and go to menu
+        await show_pickup_instructions(message, state)
 
 async def show_cart_review(callback: CallbackQuery, state: FSMContext):
     """Show cart review with management options"""

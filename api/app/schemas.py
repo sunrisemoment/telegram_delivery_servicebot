@@ -50,7 +50,7 @@ class OrderCreate(BaseModel):
     delivery_address_text: Optional[str] = None
     notes: Optional[str] = None
     payment_type: str
-    delivery_slot_et: datetime
+    delivery_slot_et: Optional[datetime] = None
     payment_metadata: Optional[Dict[str, Any]] = None
 
 class Order(OrderCreate):
@@ -68,3 +68,38 @@ class PaymentConfirmation(BaseModel):
     confirmed: bool
     confirmed_by: int
     notes: Optional[str] = None
+
+
+class CustomerInviteCreate(BaseModel):
+    alias_username: Optional[str] = None
+    alias_email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class MiniAppAuthRequest(BaseModel):
+    init_data: str
+    invite_code: Optional[str] = None
+
+
+class MiniAppAddressCreate(BaseModel):
+    label: str = "Home"
+    address_text: str
+    is_default: bool = False
+
+
+class MiniAppDeliveryFeeRequest(BaseModel):
+    delivery_or_pickup: str
+    delivery_address_id: Optional[int] = None
+    delivery_address_text: Optional[str] = None
+
+
+class MiniAppOrderCreate(BaseModel):
+    items: List[OrderItem]
+    delivery_or_pickup: str
+    delivery_address_id: Optional[int] = None
+    delivery_address_text: Optional[str] = None
+    pickup_address_id: Optional[int] = None
+    pickup_address_text: Optional[str] = None
+    notes: Optional[str] = None
+    payment_type: str
+    delivery_slot_et: Optional[datetime] = None

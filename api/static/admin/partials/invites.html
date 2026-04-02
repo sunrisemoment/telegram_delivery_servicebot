@@ -1,0 +1,33 @@
+<div class="customers-container">
+    <h1>Invite Management</h1>
+
+    <div class="tab-actions">
+        <div class="filters">
+            <button class="btn btn-primary" onclick="showCreateInviteModal()">Create Invite</button>
+            <button class="btn btn-secondary" onclick="loadInvites()">Refresh</button>
+        </div>
+    </div>
+
+    <div class="data-table">
+        <table id="invitesTable">
+            <thead>
+                <tr>
+                    <th>Code</th>
+                    <th>Alias</th>
+                    <th>Email</th>
+                    <th>Status</th>
+                    <th>Claimed By</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td colspan="7" style="text-align: center; padding: 20px; color: #666;">
+                        Loading invites...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>

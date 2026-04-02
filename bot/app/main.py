@@ -49,10 +49,12 @@ async def main():
 
         # Import and register handlers
         try:
+            from app.handlers.role_selection import register_role_handlers
             from app.handlers.customer import register_customer_handlers
             from app.handlers.admin import register_admin_handlers
             from app.handlers.driver import register_driver_handlers
 
+            register_role_handlers(dp)
             register_customer_handlers(dp)
             register_admin_handlers(dp)
             register_driver_handlers(dp)

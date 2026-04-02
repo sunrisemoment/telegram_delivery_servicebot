@@ -27,7 +27,7 @@ function updateCustomersTable(customers) {
     if (!customers || customers.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="7" style="text-align: center; padding: 20px; color: #666;">
+                <td colspan="8" style="text-align: center; padding: 20px; color: #666;">
                     No customers found
                 </td>
             </tr>
@@ -44,11 +44,12 @@ function updateCustomersTable(customers) {
         return `
             <tr>
                 <td>${customerData.telegram_id || 'N/A'}</td>
+                <td>${customerData.alias_username || customerData.alias_email || customerData.display_name || '-'}</td>
                 <td>${customerData.phone || 'No phone'}</td>
+                <td><span class="status-badge ${customerData.account_status || 'active'}">${customerData.account_status || 'active'}</span></td>
                 <td>${statistics.total_orders || customerData.order_count || 0}</td>
-                <td>${formatCurrency((statistics.total_spent || 0) * 100)}</td>
+                <td>${formatDate(customerData.last_order_date)}</td>
                 <td>${formatDate(customerData.created_at)}</td>
-                <td>${customerData.verified ? '✅' : '❌'}</td>
                 <td>
                     <button class="btn btn-primary btn-sm" onclick="viewCustomer(${customerData.id})">View</button>
                     <button class="btn btn-info btn-sm" onclick="sendMessageToCustomer(${customerData.id}, '${customerData.telegram_id}')">Message</button>
@@ -98,11 +99,15 @@ async function viewCustomer(customerId) {
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
                             <div>
                                 <p><strong>Telegram ID:</strong> ${customer.telegram_id || 'N/A'}</p>
+                                <p><strong>Display Name:</strong> ${customer.display_name || 'N/A'}</p>
+                                <p><strong>Alias:</strong> ${customer.alias_username || customer.alias_email || 'N/A'}</p>
                                 <p><strong>Phone:</strong> ${customer.phone || 'N/A'}</p>
                                 <p><strong>Verified:</strong> ${customer.verified ? '✅ Yes' : '❌ No'}</p>
                             </div>
                             <div>
                                 <p><strong>Customer ID:</strong> ${customer.id || 'N/A'}</p>
+                                <p><strong>Account Status:</strong> ${customer.account_status || 'active'}</p>
+                                <p><strong>Invite Code:</strong> ${customer.invite_code || 'N/A'}</p>
                                 <p><strong>Joined:</strong> ${formatDateTime(customer.created_at)}</p>
                                 <p><strong>Default Address ID:</strong> ${customer.default_address_id || 'Not set'}</p>
                             </div>

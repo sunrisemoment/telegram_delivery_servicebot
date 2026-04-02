@@ -7,7 +7,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: self-hosted   # uses your VPS runner
+    runs-on: linux-amd64   # uses your VPS runner
 
     steps:
       - name: Checkout code

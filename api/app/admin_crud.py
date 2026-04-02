@@ -4,6 +4,15 @@ from datetime import datetime, date, timedelta
 from typing import List, Optional
 from . import models
 import json
+from .dispatch_rules import (
+    ACTIVE_DRIVER_ORDER_STATUSES,
+    driver_can_accept_order,
+    ensure_order_ready_for_dispatch,
+    normalize_order_status,
+)
+
+
+CONFIRMED_PAYMENT_STATUSES = ['paid_0conf', 'paid_confirmed', 'paid']
 
 def get_dashboard_stats(db: Session):
     """Get overall dashboard statistics"""
@@ -11,7 +20,7 @@ def get_dashboard_stats(db: Session):
         total_orders = db.query(models.Order).count()
         
         total_revenue_result = db.query(func.sum(models.Order.total_cents)).filter(
-            models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed'])
+            models.Order.payment_status.in_(CONFIRMED_PAYMENT_STATUSES)
         ).scalar() or 0
         
         active_customers = db.query(models.Customer).count()
@@ -66,7 +75,7 @@ def get_revenue_analytics(db: Session, time_range: str = "daily"):
             func.sum(models.Order.total_cents).label('total_revenue')
         ).filter(
             models.Order.created_at >= start_date,
-            models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed'])
+            models.Order.payment_status.in_(CONFIRMED_PAYMENT_STATUSES)
         ).group_by(group_by).order_by('period').all()
         
         analytics = []
@@ -99,6 +108,12 @@ def get_all_customers(db: Session, skip: int = 0, limit: int = 100):
             "id": customer.id,
             "telegram_id": customer.telegram_id,
             "phone": customer.phone,
+            "display_name": customer.display_name,
+            "alias_username": customer.alias_username,
+            "alias_email": customer.alias_email,
+            "account_status": customer.account_status,
+            "invite_code": customer.invite.code if customer.invite else None,
+            "last_login_at": customer.last_login_at.isoformat() if customer.last_login_at else None,
             "order_count": order_count,
             "created_at": customer.created_at.isoformat(),
             "last_order_date": get_customer_last_order_date(db, customer.id)
@@ -127,16 +142,35 @@ def get_all_drivers(db: Session, skip: int = 0, limit: int = 100):
         
         active_orders = db.query(models.Order).filter(
             models.Order.driver_id == driver.id,
-            models.Order.status.in_(['out_for_delivery', 'scheduled'])
+            models.Order.status.in_(ACTIVE_DRIVER_ORDER_STATUSES)
         ).count()
+        
+        # Get pickup address info
+        pickup_address = None
+        if driver.pickup_address_id:
+            pickup_addr = db.query(models.PickupAddress).filter(
+                models.PickupAddress.id == driver.pickup_address_id
+            ).first()
+            if pickup_addr:
+                pickup_address = {
+                    "id": pickup_addr.id,
+                    "name": pickup_addr.name,
+                    "address": pickup_addr.address
+                }
         
         driver_data.append({
             "id": driver.id,
             "telegram_id": driver.telegram_id,
             "name": driver.name,
             "active": driver.active,
+            "is_online": getattr(driver, "is_online", True),
+            "accepts_delivery": getattr(driver, "accepts_delivery", True),
+            "accepts_pickup": getattr(driver, "accepts_pickup", True),
+            "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
+            "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
             "delivered_orders": delivered_orders,
             "active_orders": active_orders,
+            "pickup_address": pickup_address,
             "created_at": driver.created_at.isoformat()
         })
     
@@ -166,7 +200,7 @@ def get_all_orders(db: Session, skip: int = 0, limit: int = 100, status: Optiona
             "subtotal_cents": order.subtotal_cents,
             "total_cents": order.total_cents,
             "delivery_or_pickup": order.delivery_or_pickup,
-            "status": order.status,
+            "status": normalize_order_status(order.status),
             "payment_status": order.payment_status,
             "payment_type": order.payment_type,
             "delivery_slot_et": order.delivery_slot_et.isoformat() if order.delivery_slot_et else None,
@@ -254,7 +288,7 @@ def get_order_analytics_by_date(db: Session, start_date: date, end_date: date):
     ).filter(
         models.Order.created_at >= start_date,
         models.Order.created_at <= end_date,
-        models.Order.payment_status.in_(['paid_0conf', 'paid_confirmed'])
+        models.Order.payment_status.in_(CONFIRMED_PAYMENT_STATUSES)
     ).group_by(func.date(models.Order.created_at)).order_by('order_date').all()
     
     analytics = []
@@ -276,8 +310,14 @@ def assign_order_to_driver(db: Session, order_number: str, driver_id: int):
     driver = db.query(models.Driver).filter(models.Driver.id == driver_id).first()
     if not driver:
         return None
+
+    ensure_order_ready_for_dispatch(order)
+    can_accept, reason = driver_can_accept_order(db, driver, order)
+    if not can_accept:
+        raise ValueError(reason)
     
     # Update order with driver assignment
+    previous_status = order.status
     order.driver_id = driver_id
     order.status = 'assigned'
     
@@ -288,7 +328,7 @@ def assign_order_to_driver(db: Session, order_number: str, driver_id: int):
         payload={
             "driver_id": driver_id,
             "driver_name": driver.name,
-            "previous_status": order.status
+            "previous_status": previous_status
         }
     )
     db.add(event)

@@ -1,12 +1,11 @@
 # [file name]: payment_service.py
-import os
-import hashlib
 import logging
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Dict, List
 from sqlalchemy.orm import Session
 from . import models
 from .btc_payment_gateway import btc_gateway
+from .dispatch_rules import MANUAL_PAYMENT_TYPES, get_payment_label, normalize_payment_type
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,7 @@ class PaymentService:
             # Store payment details in order
             order.payment_txid = f"pending_{order_number}"  # Temporary ID
             order.payment_status = 'pending_btc'
-            order.payment_metadata = order.payment_metadata | {
+            order.payment_metadata = (order.payment_metadata or {}) | {
                 "btc_address": payment_result['btc_address'],
                 "btc_amount": payment_result['btc_amount'],
                 "usd_amount": payment_result['usd_amount'],
@@ -62,13 +61,16 @@ class PaymentService:
         
         # Check payment status
         status_result = btc_gateway.check_payment_status(btc_address)
-        
+
         # Update order status if payment detected
-        if status_result.get('has_payment') and order.payment_status != 'paid_0conf':
-            order.payment_status = 'paid_0conf'
-            # Don't auto-confirm - wait for admin approval
+        if status_result.get('has_payment'):
+            order.payment_status = 'pending_btc'
+            order.payment_metadata = (order.payment_metadata or {}) | {
+                "btc_payment_detected": True,
+                "btc_payment_detected_at": datetime.now().isoformat(),
+            }
             self.db.commit()
-        
+
         return status_result
     
     def confirm_btc_payment(self, order_number: str, confirmed_by: int, notes: str = None) -> bool:
@@ -77,17 +79,18 @@ class PaymentService:
         if not order:
             logger.error(f"Order not found: {order_number}")
             return False
-        
+
         if order.payment_type != 'btc':
             logger.error(f"Order {order_number} is not a BTC payment")
             return False
-        
+
         # Update payment status
-        order.payment_status = 'paid_0conf'
+        previous_status = order.payment_status
+        order.payment_status = 'paid_confirmed'
         order.payment_confirmed = True
         order.payment_confirmed_by = confirmed_by
         order.payment_confirmed_at = datetime.now()
-        
+
         # Create order event
         event = models.OrderEvent(
             order_id=order.id,
@@ -95,16 +98,92 @@ class PaymentService:
             payload={
                 "confirmed_by": confirmed_by,
                 "notes": notes,
-                "previous_status": order.payment_status
+                "previous_status": previous_status
             }
         )
         self.db.add(event)
-        
+
         self.db.commit()
         
         logger.info(f"BTC payment confirmed for order {order_number} by admin {confirmed_by}")
         return True
     
+    def mark_order_as_paid(self, order_number: str, confirmed_by: int, notes: str = None) -> bool:
+        """Mark any order as paid (general method for cash, Apple Cash, Cash App, etc.)"""
+        order = self.db.query(models.Order).filter(models.Order.order_number == order_number).first()
+        if not order:
+            logger.error(f"Order not found: {order_number}")
+            return False
+
+        payment_type = normalize_payment_type(order.payment_type)
+
+        # Determine payment status based on payment type
+        if payment_type == 'btc':
+            payment_status = 'paid_confirmed'
+        elif payment_type in MANUAL_PAYMENT_TYPES:
+            payment_status = 'paid_confirmed'
+        else:
+            payment_status = 'paid_confirmed'
+
+        # Update payment status
+        previous_status = order.payment_status
+        order.payment_status = payment_status
+        order.payment_type = payment_type
+        order.payment_confirmed = True
+        order.payment_confirmed_by = confirmed_by
+        order.payment_confirmed_at = datetime.now()
+        order.payment_metadata = (order.payment_metadata or {}) | {
+            "manual_payment_notes": notes or "",
+            "manual_payment_confirmed_at": datetime.now().isoformat(),
+        }
+
+        # Create order event
+        event = models.OrderEvent(
+            order_id=order.id,
+            type="payment_confirmed",
+            payload={
+                "confirmed_by": confirmed_by,
+                "notes": notes,
+                "previous_status": previous_status,
+                "payment_type": order.payment_type
+            }
+        )
+        self.db.add(event)
+        
+        self.db.commit()
+
+        logger.info(f"Payment confirmed for order {order_number} (type: {order.payment_type}) by admin {confirmed_by}")
+        return True
+
+    def get_pending_btc_payments(self) -> List[Dict]:
+        """Get BTC payments awaiting manual admin confirmation."""
+        btc_orders = self.db.query(models.Order).filter(
+            models.Order.payment_type == 'btc',
+            models.Order.payment_confirmed == False
+        ).order_by(models.Order.created_at.desc()).all()
+
+        result = []
+        for order in btc_orders:
+            customer = self.db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
+            payment_metadata = order.payment_metadata or {}
+
+            result.append({
+                "order_number": order.order_number,
+                "customer_telegram_id": customer.telegram_id if customer else None,
+                "customer_phone": customer.phone if customer else None,
+                "payment_label": get_payment_label(order.payment_type),
+                "payment_status": order.payment_status,
+                "payment_confirmed": order.payment_confirmed,
+                "total_amount": order.total_cents / 100,
+                "created_at": order.created_at.isoformat(),
+                "btc_address": payment_metadata.get('btc_address'),
+                "btc_amount": payment_metadata.get('btc_amount'),
+                "payment_url": payment_metadata.get('payment_url'),
+                "payment_detected": payment_metadata.get('btc_payment_detected', False),
+            })
+
+        return result
+
     def get_all_btc_payments(self) -> List[Dict]:
         """Get all BTC payments with details"""
         btc_orders = self.db.query(models.Order).filter(

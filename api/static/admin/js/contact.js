@@ -2,12 +2,15 @@
 
 let contactData = {
     welcome_message: '',
+    welcome_photo_url: '',
     telegram_id: null,
     telegram_username: '',
     phone_number: '',
     email_address: '',
     additional_info: ''
 };
+
+let selectedWelcomePhoto = null;
 
 // Initialize contact management
 function initContactManagement() {
@@ -47,6 +50,11 @@ function populateForm() {
     // Welcome message
     document.getElementById('welcomeMessage').value = contactData.welcome_message || '';
     
+    // Welcome photo
+    if (contactData.welcome_photo_url) {
+        displayWelcomePhoto(contactData.welcome_photo_url);
+    }
+    
     // Contact information
     document.getElementById('telegramId').value = contactData.telegram_id || '';
     document.getElementById('telegramUsername').value = contactData.telegram_username || '';
@@ -55,32 +63,137 @@ function populateForm() {
     document.getElementById('additionalInfo').value = contactData.additional_info || '';
 }
 
+// Handle welcome photo selection
+function handleWelcomePhotoSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    // Validate file type
+    const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+        showNotification('Please select a valid image file (JPEG, PNG, GIF, or WebP)', 'error');
+        event.target.value = '';
+        return;
+    }
+    
+    // Validate file size (max 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+        showNotification('Image file is too large. Maximum size is 5MB', 'error');
+        event.target.value = '';
+        return;
+    }
+    
+    selectedWelcomePhoto = file;
+    
+    // Show preview
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        displayWelcomePhoto(e.target.result);
+    };
+    reader.readAsDataURL(file);
+    
+    // Update label
+    const label = event.target.nextElementSibling;
+    label.textContent = file.name;
+}
+
+// Display welcome photo preview
+function displayWelcomePhoto(photoUrl) {
+    const container = document.getElementById('welcomePhotoPreviewContainer');
+    const img = document.getElementById('welcomePhotoPreview');
+    
+    // Handle both data URLs and server URLs
+    if (photoUrl.startsWith('data:')) {
+        img.src = photoUrl;
+    } else {
+        img.src = API_BASE.replace('/admin', '') + photoUrl;
+    }
+    
+    container.style.display = 'block';
+}
+
+// Remove welcome photo
+function removeWelcomePhoto() {
+    if (confirm('Are you sure you want to remove the welcome photo?')) {
+        selectedWelcomePhoto = null;
+        contactData.welcome_photo_url = '';
+        
+        // Clear file input
+        const fileInput = document.getElementById('welcomePhoto');
+        fileInput.value = '';
+        fileInput.nextElementSibling.textContent = 'Choose photo...';
+        
+        // Hide preview
+        document.getElementById('welcomePhotoPreviewContainer').style.display = 'none';
+        
+        showNotification('Photo removed. Click Save to apply changes.');
+    }
+}
+
+// Upload welcome photo to server
+async function uploadWelcomePhoto() {
+    if (!selectedWelcomePhoto) return null;
+    
+    const formData = new FormData();
+    formData.append('file', selectedWelcomePhoto);
+    
+    // If there's an old photo URL, include it for deletion
+    if (contactData.welcome_photo_url) {
+        formData.append('old_photo_url', contactData.welcome_photo_url);
+    }
+    
+    try {
+        const response = await axios.post(`${API_BASE}/upload-photo`, formData, {
+            headers: {
+                'Content-Type': 'multipart/form-data'
+            }
+        });
+        
+        return response.data.photo_url;
+    } catch (error) {
+        console.error('Error uploading photo:', error);
+        throw error;
+    }
+}
+
 // Save welcome message
-function saveWelcomeMessage() {
+async function saveWelcomeMessage() {
     const welcomeMessage = document.getElementById('welcomeMessage').value.trim();
     
     if (!welcomeMessage) {
-        showNotification('Please enter a welcome message');
+        showNotification('Please enter a welcome message', 'error');
         return;
     }
     
     showLoading('Saving welcome message...');
     
-    const data = {
-        welcome_message: welcomeMessage
-    };
-    axios.post(`${API_BASE}/contact/welcome-message`, data)
-    .then(response => {
-            showNotification('Welcome message saved successfully!');
-            contactData.welcome_message = welcomeMessage;
-            updateWelcomePreview();
-            hideLoading();
-        })
-        .catch(error => {
-            console.error('Error saving welcome message:', error);
-            showNotification('Failed to save welcome message', 'error');
-            hideLoading();
-        });
+    try {
+        let photoUrl = contactData.welcome_photo_url || '';
+        
+        // Upload photo if a new one was selected
+        if (selectedWelcomePhoto) {
+            photoUrl = await uploadWelcomePhoto();
+            selectedWelcomePhoto = null; // Clear after upload
+        }
+        
+        const data = {
+            welcome_message: welcomeMessage,
+            welcome_photo_url: photoUrl
+        };
+        
+        const response = await axios.post(`${API_BASE}/contact/welcome-message`, data);
+        
+        showNotification('Welcome message saved successfully!', 'success');
+        contactData.welcome_message = welcomeMessage;
+        contactData.welcome_photo_url = photoUrl;
+        updateWelcomePreview();
+        hideLoading();
+        
+    } catch (error) {
+        console.error('Error saving welcome message:', error);
+        showNotification('Failed to save welcome message', 'error');
+        hideLoading();
+    }
 }
 
 // Save contact information

@@ -1,0 +1,26 @@
+{
+  "name": "delivery-bot-frontends",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev:admin": "vite --config vite.admin.config.ts",
+    "dev:miniapp": "vite --config vite.miniapp.config.ts",
+    "build:admin": "vite build --config vite.admin.config.ts",
+    "build:miniapp": "vite build --config vite.miniapp.config.ts",
+    "build": "npm run build:admin && npm run build:miniapp",
+    "preview:admin": "vite preview --config vite.admin.config.ts",
+    "preview:miniapp": "vite preview --config vite.miniapp.config.ts"
+  },
+  "dependencies": {
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react-swc": "4.3.0",
+    "typescript": "6.0.2",
+    "vite": "8.0.3"
+  }
+}

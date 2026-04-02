@@ -12,9 +12,38 @@ class Customer(Base):
     id = Column(BigInteger, primary_key=True, index=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
     phone = Column(String(20))
+    display_name = Column(String(150))
+    alias_username = Column(String(100), unique=True)
+    alias_email = Column(String(200), unique=True)
+    account_status = Column(String(20), default="active")
+    invite_id = Column(BigInteger, ForeignKey("customer_invites.id"))
     verified_bool = Column(Boolean, default=False)
     default_address_id = Column(BigInteger)
+    last_login_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    invite = relationship("CustomerInvite", foreign_keys=[invite_id])
+
+
+class CustomerInvite(Base):
+    __tablename__ = "customer_invites"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    code = Column(String(32), unique=True, nullable=False, index=True)
+    alias_username = Column(String(100))
+    alias_email = Column(String(200))
+    notes = Column(Text)
+    status = Column(String(20), default="pending")
+    created_by = Column(BigInteger, ForeignKey("customers.id"))
+    claimed_by_customer_id = Column(BigInteger, ForeignKey("customers.id"))
+    claimed_by_telegram_id = Column(BigInteger)
+    claimed_at = Column(DateTime(timezone=True))
+    revoked_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    created_by_customer = relationship("Customer", foreign_keys=[created_by])
+    claimed_by_customer = relationship("Customer", foreign_keys=[claimed_by_customer_id])
 
 class CustomerAddress(Base):
     __tablename__ = "customer_addresses"
@@ -38,8 +67,17 @@ class Driver(Base):
     id = Column(BigInteger, primary_key=True, index=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False)
     name = Column(String(100))
+    phone = Column(String(20), nullable=True)
     active = Column(Boolean, default=True)
+    is_online = Column(Boolean, default=True)
+    accepts_delivery = Column(Boolean, default=True)
+    accepts_pickup = Column(Boolean, default=True)
+    max_delivery_distance_miles = Column(Float, default=15.0)
+    max_concurrent_orders = Column(Integer, default=1)
+    pickup_address_id = Column(BigInteger, ForeignKey("pickup_addresses.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    pickup_address = relationship("PickupAddress", foreign_keys=[pickup_address_id])
 
 class MenuItem(Base):
     __tablename__ = "menu_items"
@@ -100,6 +138,23 @@ class OrderEvent(Base):
 
     # Explicit relationship
     order = relationship("Order", backref="events")
+
+
+class MiniAppSession(Base):
+    __tablename__ = "miniapp_sessions"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    telegram_id = Column(BigInteger, nullable=False)
+    session_token = Column(String(128), unique=True, nullable=False, index=True)
+    init_data_hash = Column(String(64))
+    start_param = Column(String(255))
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True))
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    customer = relationship("Customer", foreign_keys=[customer_id])
 
 class DriverStock(Base):
     __tablename__ = "driver_stock"
@@ -177,6 +232,7 @@ class ContactSettings(Base):
     
     id = Column(BigInteger, primary_key=True, index=True)
     welcome_message = Column(Text, nullable=False, default="Welcome to our service!")
+    welcome_photo_url = Column(String(500), nullable=True)  # Add photo support for welcome message
     telegram_id = Column(BigInteger, nullable=True)
     telegram_username = Column(String(100), nullable=True)
     phone_number = Column(String(20), nullable=True)

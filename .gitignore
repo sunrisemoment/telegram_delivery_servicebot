@@ -129,7 +129,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-# .env
+.env
 .venv
 env/
 venv/
@@ -176,3 +176,8 @@ cython_debug/
 scripts
 api_windows_service.py
 .vscode
+api/static/uploads
+api/app/migrations
+.env.prod
+api/frontend/node_modules/
+api/frontend/dist/

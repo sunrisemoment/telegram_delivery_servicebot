@@ -27,7 +27,7 @@ function updateDriversTable(drivers) {
     if (!drivers || drivers.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="6" style="text-align: center; padding: 20px; color: #666;">
+                <td colspan="9" style="text-align: center; padding: 20px; color: #666;">
                     No drivers found
                 </td>
             </tr>
@@ -39,11 +39,18 @@ function updateDriversTable(drivers) {
         <tr>
             <td>${driver.name || 'N/A'}</td>
             <td>${driver.telegram_id || 'N/A'}</td>
-            <td>${driver.active ? 'Active' : 'Inactive'}</td>
+            <td>${driver.pickup_address ? driver.pickup_address.name : 'No location'}</td>
+            <td>${driver.active ? 'Active' : 'Inactive'} / ${driver.is_online ? 'Online' : 'Offline'}</td>
+            <td>${driver.max_delivery_distance_miles || 15} mi / ${driver.max_concurrent_orders || 1} max</td>
+            <td>${driver.accepts_delivery ? 'Delivery' : ''}${driver.accepts_delivery && driver.accepts_pickup ? ' / ' : ''}${driver.accepts_pickup ? 'Pickup' : ''}</td>
             <td>${driver.delivered_orders || 0}</td>
             <td>${driver.active_orders || 0}</td>
             <td>
                 <button class="btn btn-info btn-sm" onclick="showDriverInventory(${driver.id})">Inventory</button>
+                <button class="btn btn-warning btn-sm" onclick="editDriver(${driver.id})">Edit</button>
+                <button class="btn btn-secondary btn-sm" onclick="toggleDriverOnline(${driver.id}, ${!driver.is_online})">
+                    ${driver.is_online ? 'Go Offline' : 'Go Online'}
+                </button>
                 <button class="btn btn-warning btn-sm" onclick="toggleDriverStatus(${driver.id}, ${!driver.active})">
                     ${driver.active ? 'Deactivate' : 'Activate'}
                 </button>
@@ -70,6 +77,33 @@ function showAddDriverModal() {
                     <label>Telegram ID</label>
                     <input type="number" id="driverTelegramId" required class="form-control">
                 </div>
+                <div class="form-group">
+                    <label>Pickup Location (Optional)</label>
+                    <select id="driverPickupAddress" class="form-control">
+                        <option value="">Select pickup location</option>
+                        <!-- Will be populated dynamically -->
+                    </select>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" style="width:20px; height:20px" id="driverIsOnline" checked>
+                    <label for="driverIsOnline" style="margin: 0;">Online</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" style="width:20px; height:20px" id="driverAcceptsDelivery" checked>
+                    <label for="driverAcceptsDelivery" style="margin: 0;">Accept delivery orders</label>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 8px;">
+                    <input type="checkbox" style="width:20px; height:20px" id="driverAcceptsPickup" checked>
+                    <label for="driverAcceptsPickup" style="margin: 0;">Accept pickup orders</label>
+                </div>
+                <div class="form-group">
+                    <label>Max Delivery Distance (miles)</label>
+                    <input type="number" id="driverMaxDistance" min="1" step="0.5" value="15" class="form-control">
+                </div>
+                <div class="form-group">
+                    <label>Max Concurrent Orders</label>
+                    <input type="number" id="driverMaxConcurrentOrders" min="1" step="1" value="1" class="form-control">
+                </div>
                 <div id="addDriverResult"></div>
             </form>
         </div>
@@ -81,6 +115,9 @@ function showAddDriverModal() {
     
     showModal('addDriverModal', modalContent);
     
+    // Populate pickup addresses
+    populatePickupAddressesForDriver();
+    
     // Handle form submission
     document.getElementById('addDriverForm').addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -88,9 +125,34 @@ function showAddDriverModal() {
     });
 }
 
+async function populatePickupAddressesForDriver() {
+    try {
+        const response = await axios.get(`${API_BASE}/pickup-addresses`);
+        const select = document.getElementById('driverPickupAddress');
+        
+        if (select && response.data) {
+            select.innerHTML = '<option value="">Select pickup location</option>' +
+                response.data.map(addr => `
+                    <option value="${addr.id}">
+                        ${addr.name} - ${addr.address}
+                    </option>
+                `).join('');
+        }
+        
+    } catch (error) {
+        console.error('Error loading pickup addresses:', error);
+    }
+}
+
 async function addDriver() {
     const name = document.getElementById('driverName').value;
     const telegramId = document.getElementById('driverTelegramId').value;
+    const pickupAddressId = document.getElementById('driverPickupAddress').value;
+    const isOnline = document.getElementById('driverIsOnline').checked;
+    const acceptsDelivery = document.getElementById('driverAcceptsDelivery').checked;
+    const acceptsPickup = document.getElementById('driverAcceptsPickup').checked;
+    const maxDistance = document.getElementById('driverMaxDistance').value;
+    const maxConcurrentOrders = document.getElementById('driverMaxConcurrentOrders').value;
     const resultDiv = document.getElementById('addDriverResult');
     
     try {
@@ -99,7 +161,13 @@ async function addDriver() {
         await axios.post(`${API_BASE}/drivers`, {
             name: name,
             telegram_id: parseInt(telegramId),
-            active: true
+            active: true,
+            is_online: isOnline,
+            accepts_delivery: acceptsDelivery,
+            accepts_pickup: acceptsPickup,
+            max_delivery_distance_miles: maxDistance ? parseFloat(maxDistance) : 15,
+            max_concurrent_orders: maxConcurrentOrders ? parseInt(maxConcurrentOrders) : 1,
+            pickup_address_id: pickupAddressId ? parseInt(pickupAddressId) : null
         });
         
         resultDiv.innerHTML = '<div style="color: green; padding: 10px; background: #e6ffe6; border-radius: 5px;">Driver added successfully!</div>';
@@ -119,6 +187,146 @@ async function addDriver() {
     }
 }
 
+async function editDriver(driverId) {
+    try {
+        const response = await axios.get(`${API_BASE}/drivers`);
+        const driver = response.data.find(d => d.id === driverId);
+        
+        if (driver) {
+            const modalContent = `
+                <div class="modal-header">
+                    <h3>Edit Driver</h3>
+                </div>
+                <div class="modal-body">
+                    <form id="editDriverForm">
+                        <div class="form-group">
+                            <label>Driver Name</label>
+                            <input type="text" id="editDriverName" value="${driver.name}" required class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label>Telegram ID</label>
+                            <input type="number" id="editDriverTelegramId" value="${driver.telegram_id}" required class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label>Pickup Location</label>
+                            <select id="editDriverPickupAddress" class="form-control">
+                                <option value="">Select pickup location</option>
+                                <!-- Will be populated dynamically -->
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Max Delivery Distance (miles)</label>
+                            <input type="number" id="editDriverMaxDistance" value="${driver.max_delivery_distance_miles || 15}" min="1" step="0.5" class="form-control">
+                        </div>
+                        <div class="form-group">
+                            <label>Max Concurrent Orders</label>
+                            <input type="number" id="editDriverMaxConcurrentOrders" value="${driver.max_concurrent_orders || 1}" min="1" step="1" class="form-control">
+                        </div>
+                        <div class="form-group" style="display: flex; align-items: center; justify-content: flex-start; gap: 5px;">
+                            <input type="checkbox" style="width:20px; height: 20px" id="editDriverIsOnline" ${driver.is_online ? 'checked' : ''}>
+                            <label for="editDriverIsOnline" style="margin: 0;">Online</label>
+                        </div>
+                        <div class="form-group" style="display: flex; align-items: center; justify-content: flex-start; gap: 5px;">
+                            <input type="checkbox" style="width:20px; height: 20px" id="editDriverAcceptsDelivery" ${driver.accepts_delivery ? 'checked' : ''}>
+                            <label for="editDriverAcceptsDelivery" style="margin: 0;">Accept delivery orders</label>
+                        </div>
+                        <div class="form-group" style="display: flex; align-items: center; justify-content: flex-start; gap: 5px;">
+                            <input type="checkbox" style="width:20px; height: 20px" id="editDriverAcceptsPickup" ${driver.accepts_pickup ? 'checked' : ''}>
+                            <label for="editDriverAcceptsPickup" style="margin: 0;">Accept pickup orders</label>
+                        </div>
+                        <div class="form-group" style="display: flex; align-items: center; justify-content: flex-start; gap: 5px;">
+                            <input type="checkbox" style="width:20px; height: 20px" id="editDriverActive" ${driver.active ? 'checked' : ''}>
+                            <label for="editDriverActive" style="margin: 0;">Active</label>
+                        </div>
+                        <div id="editDriverResult"></div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="submit" form="editDriverForm" class="btn btn-success">Update Driver</button>
+                    <button class="btn btn-secondary" onclick="closeModal('editDriverModal')">Cancel</button>
+                </div>
+            `;
+            
+            showModal('editDriverModal', modalContent);
+            
+            // Populate pickup addresses and set current selection
+            await populateEditPickupAddresses(driver.pickup_address?.id);
+            
+            document.getElementById('editDriverForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                await updateDriver(driverId);
+            });
+        }
+        
+    } catch (error) {
+        console.error('Error loading driver for edit:', error);
+        showNotification('Error loading driver', 'error');
+    }
+}
+
+async function populateEditPickupAddresses(selectedId) {
+    try {
+        const response = await axios.get(`${API_BASE}/pickup-addresses`);
+        const select = document.getElementById('editDriverPickupAddress');
+        
+        if (select && response.data) {
+            select.innerHTML = '<option value="">Select pickup location</option>' +
+                response.data.map(addr => `
+                    <option value="${addr.id}" ${addr.id === selectedId ? 'selected' : ''}>
+                        ${addr.name} - ${addr.address}
+                    </option>
+                `).join('');
+        }
+        
+    } catch (error) {
+        console.error('Error loading pickup addresses:', error);
+    }
+}
+
+async function updateDriver(driverId) {
+    const name = document.getElementById('editDriverName').value;
+    const telegramId = document.getElementById('editDriverTelegramId').value;
+    const pickupAddressId = document.getElementById('editDriverPickupAddress').value;
+    const active = document.getElementById('editDriverActive').checked;
+    const isOnline = document.getElementById('editDriverIsOnline').checked;
+    const acceptsDelivery = document.getElementById('editDriverAcceptsDelivery').checked;
+    const acceptsPickup = document.getElementById('editDriverAcceptsPickup').checked;
+    const maxDistance = document.getElementById('editDriverMaxDistance').value;
+    const maxConcurrentOrders = document.getElementById('editDriverMaxConcurrentOrders').value;
+    const resultDiv = document.getElementById('editDriverResult');
+    
+    try {
+        resultDiv.innerHTML = '<div style="color: #0066cc; padding: 10px; background: #e6f2ff; border-radius: 5px;">Updating driver...</div>';
+        
+        await axios.put(`${API_BASE}/drivers/${driverId}`, {
+            name: name,
+            telegram_id: parseInt(telegramId),
+            pickup_address_id: pickupAddressId ? parseInt(pickupAddressId) : null,
+            active: active,
+            is_online: isOnline,
+            accepts_delivery: acceptsDelivery,
+            accepts_pickup: acceptsPickup,
+            max_delivery_distance_miles: maxDistance ? parseFloat(maxDistance) : 15,
+            max_concurrent_orders: maxConcurrentOrders ? parseInt(maxConcurrentOrders) : 1
+        });
+        
+        resultDiv.innerHTML = '<div style="color: green; padding: 10px; background: #e6ffe6; border-radius: 5px;">Driver updated successfully!</div>';
+        
+        setTimeout(() => {
+            closeModal('editDriverModal');
+            loadDrivers();
+        }, 2000);
+        
+    } catch (error) {
+        console.error('Error updating driver:', error);
+        resultDiv.innerHTML = `
+            <div style="color: red; padding: 10px; background: #ffe6e6; border-radius: 5px;">
+                Error updating driver: ${error.response?.data?.detail || error.message}
+            </div>
+        `;
+    }
+}
+
 async function toggleDriverStatus(driverId, active) {
     try {
         await axios.put(`${API_BASE}/drivers/${driverId}`, { active });
@@ -127,6 +335,17 @@ async function toggleDriverStatus(driverId, active) {
     } catch (error) {
         console.error('Error updating driver status:', error);
         showNotification('Error updating driver status', 'error');
+    }
+}
+
+async function toggleDriverOnline(driverId, isOnline) {
+    try {
+        await axios.put(`${API_BASE}/drivers/${driverId}`, { is_online: isOnline });
+        showNotification(`Driver marked ${isOnline ? 'online' : 'offline'}`, 'success');
+        loadDrivers();
+    } catch (error) {
+        console.error('Error updating driver availability:', error);
+        showNotification('Error updating driver availability', 'error');
     }
 }
 

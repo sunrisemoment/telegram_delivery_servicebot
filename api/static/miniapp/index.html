@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Delivery Mini App</title>
+    <link rel="stylesheet" href="css/app.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">Private Delivery Club</p>
+                <h1>Invite-only ordering inside Telegram.</h1>
+                <p id="heroSubtitle">Authenticate with Telegram to unlock menu, checkout, and live order updates.</p>
+            </div>
+            <div class="hero-badge" id="accountBadge">Locked</div>
+        </header>
+
+        <main class="main-layout">
+            <section class="card auth-card" id="authScreen">
+                <h2>Mini App Access</h2>
+                <p class="muted">
+                    This Mini App is restricted to invited customers. Open it from Telegram and redeem your invite if this is your first visit.
+                </p>
+                <form id="inviteForm" class="stack">
+                    <label class="label" for="inviteCodeInput">Invite code</label>
+                    <input id="inviteCodeInput" type="text" maxlength="16" placeholder="Enter invite code">
+                    <button type="submit" class="btn btn-primary">Activate Access</button>
+                </form>
+                <p class="helper" id="authStatus">Waiting for Telegram WebApp context.</p>
+            </section>
+
+            <section class="app-content hidden" id="appContent">
+                <nav class="tabbar">
+                    <button class="tab active" data-tab="home">Home</button>
+                    <button class="tab" data-tab="menu">Menu</button>
+                    <button class="tab" data-tab="orders">Orders</button>
+                    <button class="tab" data-tab="account">Account</button>
+                </nav>
+
+                <section class="panel active" id="homePanel">
+                    <div class="grid">
+                        <article class="card feature-card">
+                            <h2 id="welcomeTitle">Welcome</h2>
+                            <p id="welcomeMessage" class="muted">Loading your customer profile...</p>
+                            <div class="status-row">
+                                <div>
+                                    <span class="status-label">Invite</span>
+                                    <strong id="inviteCodeValue">-</strong>
+                                </div>
+                                <div>
+                                    <span class="status-label">Alias</span>
+                                    <strong id="aliasValue">-</strong>
+                                </div>
+                            </div>
+                        </article>
+
+                        <article class="card stats-card">
+                            <div class="stat">
+                                <span>Total Orders</span>
+                                <strong id="orderCountStat">0</strong>
+                            </div>
+                            <div class="stat">
+                                <span>Pending Approval</span>
+                                <strong id="pendingApprovalStat">0</strong>
+                            </div>
+                            <div class="stat">
+                                <span>BTC Discount</span>
+                                <strong id="btcDiscountStat">0%</strong>
+                            </div>
+                        </article>
+                    </div>
+
+                    <article class="card support-card">
+                        <h3>Support</h3>
+                        <p id="supportInfo" class="muted">Loading support contact…</p>
+                    </article>
+                </section>
+
+                <section class="panel" id="menuPanel">
+                    <div class="section-head">
+                        <div>
+                            <p class="eyebrow">Menu</p>
+                            <h2>Order from available inventory</h2>
+                        </div>
+                        <button class="btn btn-ghost" id="refreshMenuButton">Refresh</button>
+                    </div>
+                    <div id="menuGrid" class="menu-grid"></div>
+                </section>
+
+                <section class="panel" id="ordersPanel">
+                    <div class="section-head">
+                        <div>
+                            <p class="eyebrow">Orders</p>
+                            <h2>Your recent activity</h2>
+                        </div>
+                        <button class="btn btn-ghost" id="refreshOrdersButton">Refresh</button>
+                    </div>
+                    <div id="ordersList" class="stack"></div>
+                </section>
+
+                <section class="panel" id="accountPanel">
+                    <div class="grid">
+                        <article class="card">
+                            <div class="section-head compact">
+                                <div>
+                                    <p class="eyebrow">Addresses</p>
+                                    <h2>Saved delivery spots</h2>
+                                </div>
+                            </div>
+                            <div id="addressesList" class="stack"></div>
+                        </article>
+
+                        <article class="card">
+                            <h3>Add Address</h3>
+                            <form id="addressForm" class="stack">
+                                <label class="label" for="addressLabel">Label</label>
+                                <input id="addressLabel" type="text" placeholder="Home">
+                                <label class="label" for="addressText">Address</label>
+                                <textarea id="addressText" rows="4" placeholder="Enter full delivery address"></textarea>
+                                <label class="checkbox">
+                                    <input id="addressDefault" type="checkbox">
+                                    <span>Set as default</span>
+                                </label>
+                                <button type="submit" class="btn btn-primary">Save Address</button>
+                            </form>
+                        </article>
+                    </div>
+                </section>
+            </section>
+
+            <aside class="card cart-card hidden" id="cartCard">
+                <div class="section-head compact">
+                    <div>
+                        <p class="eyebrow">Checkout</p>
+                        <h2>Your cart</h2>
+                    </div>
+                    <button class="btn btn-ghost btn-small" id="clearCartButton">Clear</button>
+                </div>
+
+                <div id="cartItems" class="stack"></div>
+
+                <form id="checkoutForm" class="stack checkout-form">
+                    <div class="pill-row">
+                        <button type="button" class="pill active" data-delivery-type="delivery">Delivery</button>
+                        <button type="button" class="pill" data-delivery-type="pickup">Pickup</button>
+                    </div>
+
+                    <div id="deliveryFields" class="stack">
+                        <label class="label" for="deliveryAddressSelect">Saved address</label>
+                        <select id="deliveryAddressSelect">
+                            <option value="">Use manual address</option>
+                        </select>
+                        <label class="label" for="manualAddressInput">Manual address</label>
+                        <textarea id="manualAddressInput" rows="3" placeholder="Enter delivery address for this order"></textarea>
+                        <button type="button" class="btn btn-ghost btn-small" id="refreshFeeButton">Refresh Fee</button>
+                    </div>
+
+                    <div id="pickupFields" class="stack hidden">
+                        <label class="label" for="pickupAddressSelect">Pickup location</label>
+                        <select id="pickupAddressSelect"></select>
+                    </div>
+
+                    <label class="label" for="paymentTypeSelect">Payment</label>
+                    <select id="paymentTypeSelect">
+                        <option value="cash">Cash</option>
+                        <option value="cashapp">Cash App</option>
+                        <option value="apple_cash">Apple Cash</option>
+                        <option value="btc">Bitcoin</option>
+                    </select>
+
+                    <label class="label" for="deliverySlotInput">Requested time</label>
+                    <input id="deliverySlotInput" type="datetime-local">
+
+                    <label class="label" for="orderNotesInput">Notes</label>
+                    <textarea id="orderNotesInput" rows="3" placeholder="Door code, pickup preference, or anything the dispatcher should know"></textarea>
+
+                    <div class="summary-box">
+                        <div><span>Subtotal</span><strong id="subtotalValue">$0.00</strong></div>
+                        <div><span>Delivery fee</span><strong id="deliveryFeeValue">$0.00</strong></div>
+                        <div class="summary-total"><span>Total</span><strong id="totalValue">$0.00</strong></div>
+                        <p class="helper" id="checkoutHint">Dispatch only starts after payment approval.</p>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary btn-block">Place Order</button>
+                </form>
+            </aside>
+        </main>
+    </div>
+
+    <div class="toast hidden" id="toast"></div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
