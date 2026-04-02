@@ -73,6 +73,7 @@ class PaymentConfirmation(BaseModel):
 class CustomerInviteCreate(BaseModel):
     alias_username: Optional[str] = None
     alias_email: Optional[str] = None
+    target_role: Optional[str] = "customer"
     notes: Optional[str] = None
 
 
@@ -103,3 +104,13 @@ class MiniAppOrderCreate(BaseModel):
     notes: Optional[str] = None
     payment_type: str
     delivery_slot_et: Optional[datetime] = None
+
+
+class MiniAppDriverProfileUpdate(BaseModel):
+    is_online: Optional[bool] = None
+    accepts_delivery: Optional[bool] = None
+    accepts_pickup: Optional[bool] = None
+
+
+class MiniAppDriverOrderStatusUpdate(BaseModel):
+    status: str

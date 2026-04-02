@@ -1,3 +1,5 @@
+export type MiniAppRole = 'customer' | 'driver';
+
 export interface DashboardStats {
   total_orders: number;
   total_revenue: number;
@@ -11,6 +13,7 @@ export interface InviteSummary {
   code: string;
   alias_username?: string | null;
   alias_email?: string | null;
+  target_role: MiniAppRole;
   notes?: string | null;
   status: string;
   claimed_by_customer_id?: number | null;
@@ -47,6 +50,7 @@ export interface CustomerSummary {
   display_name?: string | null;
   alias_username?: string | null;
   alias_email?: string | null;
+  app_role?: MiniAppRole | null;
   account_status?: string | null;
   invite_code?: string | null;
   order_count?: number;
@@ -226,14 +230,38 @@ export interface MiniAppCustomer {
   display_name?: string | null;
   alias_username?: string | null;
   alias_email?: string | null;
+  app_role?: MiniAppRole | null;
   account_status?: string | null;
   invite_code?: string | null;
   last_login_at?: string | null;
   created_at?: string | null;
 }
 
+export interface MiniAppDriverProfile {
+  id: number;
+  telegram_id: number;
+  name: string;
+  phone?: string | null;
+  active: boolean;
+  is_online: boolean;
+  accepts_delivery: boolean;
+  accepts_pickup: boolean;
+  max_delivery_distance_miles: number;
+  max_concurrent_orders: number;
+  active_orders: number;
+  delivered_orders: number;
+  pickup_address?: {
+    id: number;
+    name: string;
+    address: string;
+  } | null;
+  created_at?: string | null;
+}
+
 export interface MiniAppConfig {
   customer: MiniAppCustomer;
+  app_role: MiniAppRole;
+  driver_profile?: MiniAppDriverProfile | null;
   btc_discount_percent: number;
   contact: {
     welcome_message?: string | null;
@@ -285,6 +313,9 @@ export interface MiniAppOrder {
   total_cents: number;
   items: OrderSummary['items'];
   notes?: string | null;
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  driver_name?: string | null;
   delivery_slot_et?: string | null;
   created_at?: string | null;
   updated_at?: string | null;

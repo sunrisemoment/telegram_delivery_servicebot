@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Session
-from sqlalchemy import func, extract, and_
+from sqlalchemy import func, extract, and_, or_
 from datetime import datetime, date, timedelta
 from typing import List, Optional
 from . import models
@@ -23,7 +23,13 @@ def get_dashboard_stats(db: Session):
             models.Order.payment_status.in_(CONFIRMED_PAYMENT_STATUSES)
         ).scalar() or 0
         
-        active_customers = db.query(models.Customer).count()
+        active_customers = db.query(models.Customer).filter(
+            models.Customer.telegram_id != 0,
+            or_(
+                models.Customer.app_role.is_(None),
+                models.Customer.app_role == 'customer',
+            ),
+        ).count()
         
         pending_orders = db.query(models.Order).filter(
             models.Order.status.in_(['placed', 'scheduled', 'out_for_delivery'])
@@ -96,7 +102,13 @@ def get_revenue_analytics(db: Session, time_range: str = "daily"):
 
 def get_all_customers(db: Session, skip: int = 0, limit: int = 100):
     """Get all customers with order counts"""
-    customers = db.query(models.Customer).offset(skip).limit(limit).all()
+    customers = db.query(models.Customer).filter(
+        models.Customer.telegram_id != 0,
+        or_(
+            models.Customer.app_role.is_(None),
+            models.Customer.app_role == 'customer',
+        ),
+    ).offset(skip).limit(limit).all()
     
     customer_data = []
     for customer in customers:
@@ -111,6 +123,7 @@ def get_all_customers(db: Session, skip: int = 0, limit: int = 100):
             "display_name": customer.display_name,
             "alias_username": customer.alias_username,
             "alias_email": customer.alias_email,
+            "app_role": customer.app_role or 'customer',
             "account_status": customer.account_status,
             "invite_code": customer.invite.code if customer.invite else None,
             "last_login_at": customer.last_login_at.isoformat() if customer.last_login_at else None,

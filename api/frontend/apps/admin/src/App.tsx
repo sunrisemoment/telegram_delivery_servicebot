@@ -694,6 +694,7 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
   const [invites, setInvites] = useState<InviteSummary[]>([]);
   const [aliasUsername, setAliasUsername] = useState('');
   const [aliasEmail, setAliasEmail] = useState('');
+  const [targetRole, setTargetRole] = useState<'customer' | 'driver'>('customer');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
 
@@ -723,11 +724,13 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
         body: JSON.stringify({
           alias_username: aliasUsername || null,
           alias_email: aliasEmail || null,
+          target_role: targetRole,
           notes: notes || null,
         }),
       });
       setAliasUsername('');
       setAliasEmail('');
+      setTargetRole('customer');
       setNotes('');
       await loadInvites();
     } catch (cause) {
@@ -754,6 +757,13 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
           </div>
         </div>
         <form className="stack" onSubmit={createInvite}>
+          <label className="field">
+            <span>Invite role</span>
+            <select value={targetRole} onChange={(event) => setTargetRole(event.target.value as 'customer' | 'driver')}>
+              <option value="customer">Customer</option>
+              <option value="driver">Driver</option>
+            </select>
+          </label>
           <label className="field">
             <span>Alias username</span>
             <input value={aliasUsername} onChange={(event) => setAliasUsername(event.target.value)} placeholder="private_member" />
@@ -794,6 +804,7 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
                 <StatusPill tone={invite.status}>{humanize(invite.status)}</StatusPill>
               </div>
               <dl className="detail-grid">
+                <DetailItem label="Role" value={humanize(invite.target_role)} />
                 <DetailItem label="Claimed By" value={`${invite.claimed_by_telegram_id ?? '—'}`} />
                 <DetailItem label="Created" value={formatDate(invite.created_at)} />
               </dl>

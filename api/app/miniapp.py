@@ -6,13 +6,21 @@ from sqlalchemy.orm import Session
 
 from . import crud, models, schemas
 from .database import get_db
-from .dispatch_rules import SUPPORTED_PAYMENT_TYPES, get_payment_label, normalize_order_status, normalize_payment_type
+from .dispatch_rules import (
+    ACTIVE_DRIVER_ORDER_STATUSES,
+    SUPPORTED_PAYMENT_TYPES,
+    ensure_order_ready_for_dispatch,
+    get_payment_label,
+    normalize_order_status,
+    normalize_payment_type,
+)
 from .inventory_service import get_inventory_service
 from .miniapp_auth import (
     build_customer_display_name,
     get_current_miniapp_customer,
     get_current_miniapp_session,
     issue_miniapp_session,
+    normalize_app_role,
     normalize_invite_code,
     validate_telegram_init_data,
 )
@@ -31,6 +39,7 @@ def _serialize_customer(customer: models.Customer) -> dict:
         "display_name": customer.display_name,
         "alias_username": customer.alias_username,
         "alias_email": customer.alias_email,
+        "app_role": normalize_app_role(getattr(customer, "app_role", None)) or "customer",
         "account_status": customer.account_status,
         "invite_code": invite_code,
         "last_login_at": customer.last_login_at.isoformat() if customer.last_login_at else None,
@@ -65,10 +74,113 @@ def _serialize_order(order: models.Order) -> dict:
         "total_cents": order.total_cents,
         "items": order.items,
         "notes": order.notes,
+        "customer_name": order.customer.display_name if order.customer else None,
+        "customer_phone": order.customer.phone if order.customer else None,
+        "driver_name": order.driver.name if order.driver else None,
         "delivery_slot_et": order.delivery_slot_et.isoformat() if order.delivery_slot_et else None,
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         "payment_metadata": order.payment_metadata or {},
+    }
+
+
+def _resolve_customer_role(customer: models.Customer) -> str:
+    return normalize_app_role(getattr(customer, "app_role", None)) or "customer"
+
+
+def _require_customer_role(customer: models.Customer) -> models.Customer:
+    if _resolve_customer_role(customer) != "customer":
+        raise HTTPException(status_code=403, detail="This Mini App account is configured for driver access")
+    return customer
+
+
+def _ensure_driver_profile(
+    db: Session,
+    customer: models.Customer,
+    telegram_user: dict | None = None,
+) -> models.Driver:
+    display_name = customer.display_name or f"Driver {customer.telegram_id}"
+    if telegram_user:
+        display_name = build_customer_display_name(telegram_user)
+
+    driver = db.query(models.Driver).filter(models.Driver.telegram_id == customer.telegram_id).first()
+    if not driver:
+        driver = models.Driver(
+            telegram_id=customer.telegram_id,
+            name=display_name,
+            phone=customer.phone,
+            active=True,
+            is_online=True,
+            accepts_delivery=True,
+            accepts_pickup=True,
+            max_delivery_distance_miles=15.0,
+            max_concurrent_orders=1,
+        )
+        db.add(driver)
+        db.flush()
+        return driver
+
+    if display_name:
+        driver.name = display_name
+    if customer.phone and not driver.phone:
+        driver.phone = customer.phone
+    if driver.active is None:
+        driver.active = True
+    if getattr(driver, "is_online", None) is None:
+        driver.is_online = True
+    if getattr(driver, "accepts_delivery", None) is None:
+        driver.accepts_delivery = True
+    if getattr(driver, "accepts_pickup", None) is None:
+        driver.accepts_pickup = True
+    if getattr(driver, "max_delivery_distance_miles", None) is None:
+        driver.max_delivery_distance_miles = 15.0
+    if getattr(driver, "max_concurrent_orders", None) is None:
+        driver.max_concurrent_orders = 1
+    return driver
+
+
+def _get_driver_for_customer(db: Session, customer: models.Customer) -> models.Driver:
+    if _resolve_customer_role(customer) != "driver":
+        raise HTTPException(status_code=403, detail="This Mini App account is not configured for driver access")
+
+    driver = db.query(models.Driver).filter(models.Driver.telegram_id == customer.telegram_id).first()
+    if not driver:
+        driver = _ensure_driver_profile(db, customer)
+        db.commit()
+        db.refresh(driver)
+    return driver
+
+
+def _serialize_driver_profile(db: Session, driver: models.Driver) -> dict:
+    active_orders = db.query(models.Order).filter(
+        models.Order.driver_id == driver.id,
+        models.Order.status.in_(ACTIVE_DRIVER_ORDER_STATUSES),
+    ).count()
+    delivered_orders = db.query(models.Order).filter(
+        models.Order.driver_id == driver.id,
+        models.Order.status == "delivered",
+    ).count()
+    pickup_address = driver.pickup_address
+
+    return {
+        "id": driver.id,
+        "telegram_id": driver.telegram_id,
+        "name": driver.name,
+        "phone": driver.phone,
+        "active": driver.active,
+        "is_online": getattr(driver, "is_online", True),
+        "accepts_delivery": getattr(driver, "accepts_delivery", True),
+        "accepts_pickup": getattr(driver, "accepts_pickup", True),
+        "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
+        "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
+        "active_orders": active_orders,
+        "delivered_orders": delivered_orders,
+        "pickup_address": {
+            "id": pickup_address.id,
+            "name": pickup_address.name,
+            "address": pickup_address.address,
+        } if pickup_address else None,
+        "created_at": driver.created_at.isoformat() if driver.created_at else None,
     }
 
 
@@ -119,9 +231,12 @@ def _claim_invite_for_customer(
     customer: models.Customer,
     telegram_id: int,
 ) -> models.CustomerInvite:
+    invite_role = normalize_app_role(invite.target_role) or "customer"
     if invite.status == "claimed":
         if invite.claimed_by_customer_id != customer.id:
             raise HTTPException(status_code=409, detail={"code": "invite_claimed", "message": "Invite code has already been claimed"})
+        customer.app_role = invite_role
+        customer.account_status = "active"
         return invite
 
     invite.status = "claimed"
@@ -129,6 +244,7 @@ def _claim_invite_for_customer(
     invite.claimed_by_telegram_id = telegram_id
     invite.claimed_at = datetime.now(timezone.utc)
     customer.invite_id = invite.id
+    customer.app_role = invite_role
     if invite.alias_email and not customer.alias_email:
         normalized_email = invite.alias_email.strip().lower()
         existing_email_owner = db.query(models.Customer).filter(
@@ -225,6 +341,7 @@ async def miniapp_telegram_auth(
             display_name=build_customer_display_name(telegram_user),
             alias_username=_ensure_unique_alias_username(db, desired_alias),
             alias_email=invite.alias_email.strip().lower() if invite.alias_email else None,
+            app_role=normalize_app_role(invite.target_role) or "customer",
             account_status="active",
         )
         db.add(customer)
@@ -241,6 +358,8 @@ async def miniapp_telegram_auth(
     customer.account_status = "active"
     if telegram_user.get("username") and not customer.alias_username:
         customer.alias_username = _ensure_unique_alias_username(db, telegram_user["username"], customer.id)
+    if _resolve_customer_role(customer) == "driver":
+        _ensure_driver_profile(db, customer, telegram_user)
     db.commit()
     db.refresh(customer)
 
@@ -260,6 +379,7 @@ async def miniapp_telegram_auth(
         "invite": {
             "code": invite.code if invite else None,
             "status": invite.status if invite else None,
+            "target_role": normalize_app_role(invite.target_role) if invite else None,
             "alias_username": invite.alias_username if invite else None,
             "alias_email": invite.alias_email if invite else None,
         },
@@ -288,8 +408,14 @@ async def miniapp_config(
 ):
     settings = db.query(models.Settings).first()
     contact_settings = db.query(models.ContactSettings).first()
+    app_role = _resolve_customer_role(customer)
+    driver_profile = None
+    if app_role == "driver":
+        driver_profile = _serialize_driver_profile(db, _get_driver_for_customer(db, customer))
     return {
         "customer": _serialize_customer(customer),
+        "app_role": app_role,
+        "driver_profile": driver_profile,
         "btc_discount_percent": settings.btc_discount_percent if settings else 0,
         "contact": {
             "welcome_message": contact_settings.welcome_message if contact_settings else "Welcome",
@@ -306,7 +432,7 @@ async def miniapp_menu(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
-    del customer
+    _require_customer_role(customer)
     inventory_service = get_inventory_service(db)
     menu_items = crud.get_active_menu_items(db)
     return [
@@ -328,9 +454,15 @@ async def miniapp_orders(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
-    orders = db.query(models.Order).filter(
-        models.Order.customer_id == customer.id
-    ).order_by(models.Order.created_at.desc()).all()
+    if _resolve_customer_role(customer) == "driver":
+        driver = _get_driver_for_customer(db, customer)
+        orders = db.query(models.Order).filter(
+            models.Order.driver_id == driver.id
+        ).order_by(models.Order.created_at.desc()).all()
+    else:
+        orders = db.query(models.Order).filter(
+            models.Order.customer_id == customer.id
+        ).order_by(models.Order.created_at.desc()).all()
     return [_serialize_order(order) for order in orders]
 
 
@@ -339,6 +471,7 @@ async def miniapp_addresses(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_customer_role(customer)
     addresses = db.query(models.CustomerAddress).filter(
         models.CustomerAddress.customer_id == customer.id
     ).order_by(
@@ -354,6 +487,7 @@ async def miniapp_create_address(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_customer_role(customer)
     if address_data.is_default:
         db.query(models.CustomerAddress).filter(
             models.CustomerAddress.customer_id == customer.id,
@@ -378,6 +512,7 @@ async def miniapp_set_default_address(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_customer_role(customer)
     address = db.query(models.CustomerAddress).filter(
         models.CustomerAddress.id == address_id,
         models.CustomerAddress.customer_id == customer.id,
@@ -401,6 +536,7 @@ async def miniapp_delete_address(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_customer_role(customer)
     address = db.query(models.CustomerAddress).filter(
         models.CustomerAddress.id == address_id,
         models.CustomerAddress.customer_id == customer.id,
@@ -418,7 +554,7 @@ async def miniapp_pickup_addresses(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
-    del customer
+    _require_customer_role(customer)
     pickup_addresses = db.query(models.PickupAddress).filter(
         models.PickupAddress.active.is_(True)
     ).all()
@@ -439,6 +575,7 @@ async def miniapp_delivery_fee(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_customer_role(customer)
     delivery_fee_cents, delivery_zone, _, _ = _resolve_delivery_fee(
         db=db,
         customer=customer,
@@ -459,6 +596,7 @@ async def miniapp_create_order(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_customer_role(customer)
     if not order_data.items:
         raise HTTPException(status_code=400, detail="At least one item is required")
 
@@ -586,4 +724,93 @@ async def miniapp_create_order(
         "payment_url": payment_url,
         "payment_label": get_payment_label(payment_type),
         "message": "Order created. Payment approval is required before dispatch.",
+    }
+
+
+@router.put("/driver/profile")
+async def miniapp_update_driver_profile(
+    profile_data: schemas.MiniAppDriverProfileUpdate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    driver = _get_driver_for_customer(db, customer)
+
+    if profile_data.is_online is not None:
+        driver.is_online = profile_data.is_online
+    if profile_data.accepts_delivery is not None:
+        driver.accepts_delivery = profile_data.accepts_delivery
+    if profile_data.accepts_pickup is not None:
+        driver.accepts_pickup = profile_data.accepts_pickup
+
+    db.commit()
+    db.refresh(driver)
+    return _serialize_driver_profile(db, driver)
+
+
+@router.post("/driver/orders/{order_number}/status")
+async def miniapp_update_driver_order_status(
+    order_number: str,
+    status_data: schemas.MiniAppDriverOrderStatusUpdate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    driver = _get_driver_for_customer(db, customer)
+    next_status = normalize_order_status(status_data.status)
+    if next_status not in {"out_for_delivery", "delivered"}:
+        raise HTTPException(status_code=400, detail="Drivers can only update orders to out_for_delivery or delivered")
+
+    order = db.query(models.Order).filter(
+        models.Order.order_number == order_number,
+        models.Order.driver_id == driver.id,
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Assigned order not found")
+
+    valid_transitions = {
+        "out_for_delivery": {"assigned", "preparing", "ready", "scheduled"},
+        "delivered": {"assigned", "preparing", "ready", "scheduled", "out_for_delivery"},
+    }
+    current_status = normalize_order_status(order.status)
+    if current_status not in valid_transitions[next_status]:
+        raise HTTPException(status_code=409, detail=f"Order cannot be moved from {current_status} to {next_status}")
+
+    if next_status == "out_for_delivery":
+        try:
+            ensure_order_ready_for_dispatch(order)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    elif next_status == "delivered":
+        inventory_service = get_inventory_service(db)
+        inventory_service.fulfill_reservations(order.id, driver.id)
+
+    order.status = next_status
+    order.updated_at = datetime.now(timezone.utc)
+    db.add(
+        models.OrderEvent(
+            order_id=order.id,
+            type=f"miniapp_driver_status_changed_to_{next_status}",
+            payload={
+                "driver_id": driver.id,
+                "driver_telegram_id": driver.telegram_id,
+                "previous_status": current_status,
+                "new_status": next_status,
+                "source": "miniapp",
+            },
+        )
+    )
+    db.commit()
+    db.refresh(order)
+
+    if order.customer and order.customer.telegram_id:
+        telegram_service.notify_order_status_update(
+            order.customer.telegram_id,
+            order.order_number,
+            next_status,
+            driver_name=driver.name,
+        )
+
+    return {
+        "message": f"Order {order.order_number} marked as {next_status}",
+        "order": _serialize_order(order),
+        "driver_profile": _serialize_driver_profile(db, driver),
     }

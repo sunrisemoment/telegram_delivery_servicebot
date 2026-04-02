@@ -29,6 +29,7 @@ from .dispatch_rules import (
     get_payment_label,
     normalize_order_status,
 )
+from .miniapp_auth import normalize_app_role
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ def _serialize_invite(invite: models.CustomerInvite) -> dict:
         "code": invite.code,
         "alias_username": invite.alias_username,
         "alias_email": invite.alias_email,
+        "target_role": normalize_app_role(invite.target_role) or "customer",
         "notes": invite.notes,
         "status": invite.status,
         "claimed_by_customer_id": invite.claimed_by_customer_id,
@@ -92,6 +94,13 @@ def _normalize_alias_username(alias_username: str | None) -> str | None:
     normalized = normalized.strip("_")
     normalized = "_".join(part for part in normalized.split("_") if part)
     return normalized or None
+
+
+def _normalize_invite_target_role(target_role: str | None) -> str:
+    normalized = normalize_app_role(target_role)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Invite role must be either 'customer' or 'driver'")
+    return normalized
 
 @router.get("/export_csv")
 async def export_csv(date: str, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
@@ -228,6 +237,7 @@ async def admin_create_invite(
 
     alias_email = invite_data.alias_email.strip().lower() if invite_data.alias_email else None
     alias_username = _normalize_alias_username(invite_data.alias_username)
+    target_role = _normalize_invite_target_role(invite_data.target_role)
 
     if alias_username:
         existing_username = db.query(models.Customer).filter(models.Customer.alias_username == alias_username).first()
@@ -256,6 +266,7 @@ async def admin_create_invite(
         code=_generate_invite_code(db),
         alias_username=alias_username,
         alias_email=alias_email,
+        target_role=target_role,
         notes=invite_data.notes,
         status="pending",
         created_by=admin_customer.id,

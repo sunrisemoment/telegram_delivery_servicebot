@@ -8,7 +8,9 @@ import type {
   MenuItem,
   MiniAppConfig,
   MiniAppCustomer,
+  MiniAppDriverProfile,
   MiniAppOrder,
+  MiniAppRole,
   PickupLocation,
 } from '@shared/types';
 
@@ -38,6 +40,7 @@ interface AuthResponse {
   invite: {
     code?: string | null;
     status?: string | null;
+    target_role?: MiniAppRole | null;
     alias_username?: string | null;
     alias_email?: string | null;
   };
@@ -220,6 +223,8 @@ function App() {
   const [authPending, setAuthPending] = useState(false);
   const [placingOrder, setPlacingOrder] = useState(false);
   const [savingAddress, setSavingAddress] = useState(false);
+  const [savingDriverProfile, setSavingDriverProfile] = useState(false);
+  const [driverActionOrderNumber, setDriverActionOrderNumber] = useState('');
   const [activeView, setActiveView] = useState<ViewKey>('home');
   const [authStatus, setAuthStatus] = useState('Waiting for Telegram Mini App context.');
   const [authTone, setAuthTone] = useState<AuthTone>('default');
@@ -250,6 +255,10 @@ function App() {
   const [newAddressText, setNewAddressText] = useState('');
   const [newAddressDefault, setNewAddressDefault] = useState(false);
 
+  const appRole: MiniAppRole = config?.app_role || customer?.app_role || 'customer';
+  const isDriverApp = appRole === 'driver';
+  const driverProfile: MiniAppDriverProfile | null = config?.driver_profile || null;
+  const availableViews: ViewKey[] = isDriverApp ? ['home', 'orders', 'account'] : ['home', 'menu', 'orders', 'account'];
   const deferredMenuSearch = useDeferredValue(menuSearch);
   const subtotalCents = cart.reduce((sum, item) => sum + item.price_cents * item.quantity, 0);
   const totalCents = subtotalCents + (deliveryMode === 'pickup' ? 0 : deliveryFeeCents);
@@ -284,20 +293,35 @@ function App() {
     setError('');
 
     try {
-      const [configResponse, menuResponse, ordersResponse, addressesResponse, pickupResponse] = await Promise.all([
-        miniappRequest<MiniAppConfig>(token, '/config'),
-        miniappRequest<MenuItem[]>(token, '/menu'),
+      const configResponse = await miniappRequest<MiniAppConfig>(token, '/config');
+      const nextRole: MiniAppRole = configResponse.app_role || configResponse.customer.app_role || 'customer';
+      const requests: Array<Promise<unknown>> = [
         miniappRequest<MiniAppOrder[]>(token, '/orders'),
-        miniappRequest<CustomerAddress[]>(token, '/addresses'),
-        miniappRequest<PickupLocation[]>(token, '/pickup-addresses'),
-      ]);
+      ];
+      if (nextRole === 'customer') {
+        requests.push(
+          miniappRequest<MenuItem[]>(token, '/menu'),
+          miniappRequest<CustomerAddress[]>(token, '/addresses'),
+          miniappRequest<PickupLocation[]>(token, '/pickup-addresses'),
+        );
+      }
 
+      const [ordersResponse, menuResponse, addressesResponse, pickupResponse] = await Promise.all(requests);
       setConfig(configResponse);
       setCustomer(configResponse.customer);
-      setMenu(Array.isArray(menuResponse) ? menuResponse : []);
       setOrders(Array.isArray(ordersResponse) ? ordersResponse : []);
-      setAddresses(Array.isArray(addressesResponse) ? addressesResponse : []);
-      setPickupLocations(Array.isArray(pickupResponse) ? pickupResponse : []);
+      if (nextRole === 'customer') {
+        setMenu(Array.isArray(menuResponse) ? menuResponse : []);
+        setAddresses(Array.isArray(addressesResponse) ? addressesResponse : []);
+        setPickupLocations(Array.isArray(pickupResponse) ? pickupResponse : []);
+      } else {
+        setMenu([]);
+        setAddresses([]);
+        setPickupLocations([]);
+        setCart([]);
+        setDeliveryFeeCents(0);
+        setDeliveryZone('Driver mode');
+      }
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
@@ -329,6 +353,23 @@ function App() {
     setCustomer(authResponse.customer);
     setAuthStatus('Mini App access is active.');
     setAuthTone('default');
+  }
+
+  async function refreshConfig(token = sessionToken) {
+    if (!token) {
+      return;
+    }
+    try {
+      const configResponse = await miniappRequest<MiniAppConfig>(token, '/config');
+      setConfig(configResponse);
+      setCustomer(configResponse.customer);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+    }
   }
 
   async function refreshMenu(token = sessionToken) {
@@ -376,6 +417,56 @@ function App() {
         return;
       }
       pushToast(extractErrorMessage(cause), 'error');
+    }
+  }
+
+  async function updateDriverProfile(patch: Partial<Pick<MiniAppDriverProfile, 'is_online' | 'accepts_delivery' | 'accepts_pickup'>>) {
+    if (!sessionToken || !isDriverApp) {
+      return;
+    }
+
+    setSavingDriverProfile(true);
+    try {
+      await miniappRequest<MiniAppDriverProfile>(sessionToken, '/driver/profile', {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+      await refreshConfig(sessionToken);
+      pushToast('Driver profile updated');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+    } finally {
+      setSavingDriverProfile(false);
+    }
+  }
+
+  async function updateDriverOrderStatus(orderNumber: string, status: 'out_for_delivery' | 'delivered') {
+    if (!sessionToken || !isDriverApp) {
+      return;
+    }
+
+    setDriverActionOrderNumber(orderNumber);
+    try {
+      await miniappRequest(sessionToken, `/driver/orders/${orderNumber}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status }),
+      });
+      await Promise.all([refreshOrders(sessionToken), refreshConfig(sessionToken)]);
+      pushToast(`Order ${orderNumber} marked ${humanize(status)}`);
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setDriverActionOrderNumber('');
     }
   }
 
@@ -597,6 +688,12 @@ function App() {
   }, [cart]);
 
   useEffect(() => {
+    if (isDriverApp && activeView === 'menu') {
+      setActiveView('home');
+    }
+  }, [activeView, isDriverApp]);
+
+  useEffect(() => {
     if (!toast) {
       return undefined;
     }
@@ -717,6 +814,11 @@ function App() {
     if (!sessionToken) {
       return undefined;
     }
+    if (isDriverApp) {
+      setDeliveryFeeCents(0);
+      setDeliveryZone('Driver mode');
+      return undefined;
+    }
 
     if (deliveryMode === 'pickup') {
       setDeliveryFeeCents(0);
@@ -764,7 +866,7 @@ function App() {
       cancelled = true;
       window.clearTimeout(timeout);
     };
-  }, [sessionToken, deliveryMode, deliveryAddressId, manualAddress]);
+  }, [sessionToken, isDriverApp, deliveryMode, deliveryAddressId, manualAddress]);
 
   const filteredMenu = menu.filter((item) => {
     const haystack = `${item.category} ${item.name} ${item.description ?? ''}`.toLowerCase();
@@ -783,13 +885,15 @@ function App() {
       <header className="miniapp-hero">
         <div>
           <p className="eyebrow">Private Delivery Club</p>
-          <h1>Invite-only ordering inside Telegram.</h1>
+          <h1>{isDriverApp ? 'Driver dispatch inside Telegram.' : 'Invite-only ordering inside Telegram.'}</h1>
           <p className="hero-copy">
-            Order, save delivery addresses, and track payment-gated dispatch from the Mini App instead of the bot chat.
+            {isDriverApp
+              ? 'Review assigned orders, update delivery status, and control driver availability without leaving Telegram.'
+              : 'Order, save delivery addresses, and track payment-gated dispatch from the Mini App instead of the bot chat.'}
           </p>
         </div>
         <div className={`hero-badge ${authenticated ? 'active' : 'locked'}`}>
-          {customer?.account_status ? humanize(customer.account_status) : 'Locked'}
+          {authenticated ? `${humanize(appRole)} • ${humanize(customer?.account_status || 'active')}` : 'Locked'}
         </div>
       </header>
 
@@ -797,13 +901,13 @@ function App() {
         <article className="surface loading-surface">
           <p className="eyebrow">Booting</p>
           <h2>Checking Telegram session</h2>
-          <p>Verifying your Mini App session and loading the current storefront.</p>
+          <p>Verifying your Mini App session and loading the current workspace.</p>
         </article>
       ) : authenticated ? (
-        <div className="miniapp-layout">
+        <div className={`miniapp-layout ${isDriverApp ? 'driver-layout' : ''}`}>
           <main className="content-column">
             <nav className="tabbar">
-              {(['home', 'menu', 'orders', 'account'] as ViewKey[]).map((view) => (
+              {availableViews.map((view) => (
                 <button
                   key={view}
                   className={`tab ${activeView === view ? 'active' : ''}`}
@@ -819,15 +923,17 @@ function App() {
 
             {activeView === 'home' ? (
               <HomeView
+                appRole={appRole}
                 customer={customer}
                 config={config}
+                driverProfile={driverProfile}
                 pendingApprovalCount={pendingApprovalCount}
                 orderCount={orders.length}
                 supportText={supportText}
               />
             ) : null}
 
-            {activeView === 'menu' ? (
+            {!isDriverApp && activeView === 'menu' ? (
               <MenuView
                 groupedMenu={groupedMenu}
                 menuSearch={menuSearch}
@@ -838,67 +944,80 @@ function App() {
             ) : null}
 
             {activeView === 'orders' ? (
-              <OrdersView orders={orders} onRefresh={() => void refreshOrders()} />
+              <OrdersView
+                appRole={appRole}
+                orders={orders}
+                busyOrderNumber={driverActionOrderNumber}
+                onRefresh={() => void refreshOrders()}
+                onDriverStatusChange={(orderNumber, status) => void updateDriverOrderStatus(orderNumber, status)}
+              />
             ) : null}
 
             {activeView === 'account' ? (
               <AccountView
+                appRole={appRole}
                 customer={customer}
+                driverProfile={driverProfile}
+                supportText={supportText}
                 addresses={addresses}
                 newAddressLabel={newAddressLabel}
                 newAddressText={newAddressText}
                 newAddressDefault={newAddressDefault}
                 savingAddress={savingAddress}
+                savingDriverProfile={savingDriverProfile}
                 onNewAddressLabel={setNewAddressLabel}
                 onNewAddressText={setNewAddressText}
                 onNewAddressDefault={setNewAddressDefault}
                 onSaveAddress={handleSaveAddress}
                 onSetDefaultAddress={handleSetDefaultAddress}
                 onDeleteAddress={handleDeleteAddress}
+                onDriverProfileChange={(patch) => void updateDriverProfile(patch)}
                 onLogout={() => void logout()}
               />
             ) : null}
           </main>
 
-          <aside className="cart-column">
-            <CartView
-              cart={cart}
-              subtotalCents={subtotalCents}
-              totalCents={totalCents}
-              deliveryFeeCents={deliveryMode === 'pickup' ? 0 : deliveryFeeCents}
-              deliveryZone={deliveryZone}
-              deliveryMode={deliveryMode}
-              deliveryAddressId={deliveryAddressId}
-              manualAddress={manualAddress}
-              pickupAddressId={pickupAddressId}
-              paymentType={paymentType}
-              deliverySlot={deliverySlot}
-              notes={notes}
-              addresses={addresses}
-              pickupLocations={pickupLocations}
-              placingOrder={placingOrder}
-              onDeliveryMode={setDeliveryMode}
-              onDeliveryAddressChange={(value) => {
-                setDeliveryAddressId(value);
-                if (value) {
-                  setManualAddress('');
-                }
-              }}
-              onManualAddressChange={(value) => {
-                setManualAddress(value);
-                if (value.trim()) {
-                  setDeliveryAddressId('');
-                }
-              }}
-              onPickupAddressChange={setPickupAddressId}
-              onPaymentType={setPaymentType}
-              onDeliverySlot={setDeliverySlot}
-              onNotes={setNotes}
-              onQuantityChange={updateCartQuantity}
-              onClearCart={clearCart}
-              onSubmit={handlePlaceOrder}
-            />
-          </aside>
+          {!isDriverApp ? (
+            <aside className="cart-column">
+              <CartView
+                cart={cart}
+                subtotalCents={subtotalCents}
+                totalCents={totalCents}
+                deliveryFeeCents={deliveryMode === 'pickup' ? 0 : deliveryFeeCents}
+                deliveryZone={deliveryZone}
+                deliveryMode={deliveryMode}
+                deliveryAddressId={deliveryAddressId}
+                manualAddress={manualAddress}
+                pickupAddressId={pickupAddressId}
+                paymentType={paymentType}
+                deliverySlot={deliverySlot}
+                notes={notes}
+                addresses={addresses}
+                pickupLocations={pickupLocations}
+                placingOrder={placingOrder}
+                onDeliveryMode={setDeliveryMode}
+                onDeliveryAddressChange={(value) => {
+                  setDeliveryAddressId(value);
+                  if (value) {
+                    setManualAddress('');
+                  }
+                }}
+                onManualAddressChange={(value) => {
+                  setManualAddress(value);
+                  if (value.trim()) {
+                    setDeliveryAddressId('');
+                  }
+                }}
+                onPickupAddressChange={setPickupAddressId}
+                onPaymentType={setPaymentType}
+                onDeliverySlot={setDeliverySlot}
+                onNotes={setNotes}
+                onQuantityChange={updateCartQuantity}
+                onClearCart={clearCart}
+                onSubmit={handlePlaceOrder}
+              />
+            </aside>
+          ) : null}
         </div>
       ) : (
         <AuthView
@@ -936,7 +1055,7 @@ function AuthView({
       <p className="eyebrow">Mini App Access</p>
       <h2>Authenticate through Telegram</h2>
       <p className="muted-copy">
-        This Mini App is restricted to invited customers. If this is your first visit, redeem your invite code here and your Telegram account will be bound to the private customer profile.
+        This Mini App is restricted to invited customers and drivers. If this is your first visit, redeem your invite code here and your Telegram account will be bound to the assigned private profile.
       </p>
 
       <form className="stack" onSubmit={onSubmit}>
@@ -960,18 +1079,73 @@ function AuthView({
 }
 
 function HomeView({
+  appRole,
   customer,
   config,
+  driverProfile,
   pendingApprovalCount,
   orderCount,
   supportText,
 }: {
+  appRole: MiniAppRole;
   customer: MiniAppCustomer | null;
   config: MiniAppConfig | null;
+  driverProfile: MiniAppDriverProfile | null;
   pendingApprovalCount: number;
   orderCount: number;
   supportText: string;
 }) {
+  if (appRole === 'driver') {
+    return (
+      <section className="view-stack">
+        <div className="feature-grid">
+          <article className="surface feature-panel">
+            <p className="eyebrow">Driver</p>
+            <h2>{driverProfile?.name || customer?.display_name || 'Private Driver'}</h2>
+            <p className="muted-copy">
+              {config?.contact.welcome_message || 'Your private driver workspace is active inside Telegram.'}
+            </p>
+            <dl className="detail-grid">
+              <DetailItem label="Invite" value={customer?.invite_code || 'Pending'} />
+              <DetailItem label="Status" value={driverProfile?.is_online ? 'Online' : 'Offline'} />
+              <DetailItem
+                label="Modes"
+                value={[
+                  driverProfile?.accepts_delivery ? 'Delivery' : null,
+                  driverProfile?.accepts_pickup ? 'Pickup' : null,
+                ].filter(Boolean).join(' / ') || 'Unavailable'}
+              />
+              <DetailItem
+                label="Pickup Hub"
+                value={driverProfile?.pickup_address?.name || 'Unassigned'}
+              />
+            </dl>
+          </article>
+
+          <article className="surface stats-panel">
+            <StatTile label="Assigned" value={`${driverProfile?.active_orders || 0}`} />
+            <StatTile label="Delivered" value={`${driverProfile?.delivered_orders || 0}`} tone="olive" />
+            <StatTile
+              label="Capacity"
+              value={`${driverProfile?.active_orders || 0}/${driverProfile?.max_concurrent_orders || 1}`}
+              tone="warning"
+            />
+          </article>
+        </div>
+
+        <article className="surface support-panel">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Dispatch</p>
+              <h3>Coordinator contact</h3>
+            </div>
+          </div>
+          <p className="muted-copy">{supportText}</p>
+        </article>
+      </section>
+    );
+  }
+
   return (
     <section className="view-stack">
       <div className="feature-grid">
@@ -1096,7 +1270,103 @@ function MenuView({
   );
 }
 
-function OrdersView({ orders, onRefresh }: { orders: MiniAppOrder[]; onRefresh: () => void }) {
+function OrdersView({
+  appRole,
+  orders,
+  busyOrderNumber,
+  onRefresh,
+  onDriverStatusChange,
+}: {
+  appRole: MiniAppRole;
+  orders: MiniAppOrder[];
+  busyOrderNumber: string;
+  onRefresh: () => void;
+  onDriverStatusChange: (orderNumber: string, status: 'out_for_delivery' | 'delivered') => void;
+}) {
+  if (appRole === 'driver') {
+    return (
+      <section className="view-stack">
+        <article className="surface">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Orders</p>
+              <h2>Assigned dispatch queue</h2>
+            </div>
+            <button className="secondary-button" onClick={onRefresh}>
+              Refresh
+            </button>
+          </div>
+        </article>
+
+        {orders.length ? (
+          <div className="order-list">
+            {orders.map((order) => {
+              const canStartDelivery = ['assigned', 'preparing', 'ready', 'scheduled'].includes(order.status);
+              const canCompleteDelivery = order.status === 'out_for_delivery';
+              const destination = order.delivery_address_text || order.pickup_address_text || 'Pending';
+              const isBusy = busyOrderNumber === order.order_number;
+              return (
+                <article key={order.order_number} className="surface order-card">
+                  <div className="section-head compact">
+                    <div>
+                      <p className="eyebrow">{order.order_number}</p>
+                      <h3>{formatCurrency(order.total_cents)}</h3>
+                    </div>
+                    <div className="status-row">
+                      <StatusPill tone={order.status}>{humanize(order.status)}</StatusPill>
+                      <StatusPill tone={order.payment_confirmed ? 'approved' : 'pending'}>
+                        {order.payment_confirmed ? 'Dispatch Cleared' : 'Awaiting Payment'}
+                      </StatusPill>
+                    </div>
+                  </div>
+
+                  <p className="muted-copy">{order.items.map((item) => `${item.name} x${item.quantity}`).join(', ')}</p>
+
+                  <dl className="detail-grid">
+                    <DetailItem label="Customer" value={order.customer_name || 'Unknown'} />
+                    <DetailItem label="Phone" value={order.customer_phone || 'Not provided'} />
+                    <DetailItem label="Type" value={humanize(order.delivery_or_pickup)} />
+                    <DetailItem label="Destination" value={destination} />
+                    <DetailItem label="Payment" value={order.payment_label} />
+                    <DetailItem label="Created" value={formatDateTime(order.created_at)} />
+                  </dl>
+
+                  {order.notes ? <p className="helper-text">{order.notes}</p> : null}
+
+                  <div className="row-actions">
+                    {canStartDelivery ? (
+                      <button
+                        className="primary-button compact-button"
+                        disabled={isBusy || !order.payment_confirmed}
+                        onClick={() => onDriverStatusChange(order.order_number, 'out_for_delivery')}
+                      >
+                        {isBusy ? 'Updating…' : 'Start Delivery'}
+                      </button>
+                    ) : null}
+                    {canCompleteDelivery ? (
+                      <button
+                        className="secondary-button compact-button"
+                        disabled={isBusy}
+                        onClick={() => onDriverStatusChange(order.order_number, 'delivered')}
+                      >
+                        {isBusy ? 'Updating…' : 'Mark Delivered'}
+                      </button>
+                    ) : null}
+                    {!order.payment_confirmed ? (
+                      <span className="helper-text">Dispatch is blocked until payment is approved.</span>
+                    ) : null}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptySurface title="No assigned orders" copy="When dispatch assigns you an order, it will appear here." />
+        )}
+      </section>
+    );
+  }
+
   return (
     <section className="view-stack">
       <article className="surface">
@@ -1152,34 +1422,128 @@ function OrdersView({ orders, onRefresh }: { orders: MiniAppOrder[]; onRefresh: 
 }
 
 function AccountView({
+  appRole,
   customer,
+  driverProfile,
+  supportText,
   addresses,
   newAddressLabel,
   newAddressText,
   newAddressDefault,
   savingAddress,
+  savingDriverProfile,
   onNewAddressLabel,
   onNewAddressText,
   onNewAddressDefault,
   onSaveAddress,
   onSetDefaultAddress,
   onDeleteAddress,
+  onDriverProfileChange,
   onLogout,
 }: {
+  appRole: MiniAppRole;
   customer: MiniAppCustomer | null;
+  driverProfile: MiniAppDriverProfile | null;
+  supportText: string;
   addresses: CustomerAddress[];
   newAddressLabel: string;
   newAddressText: string;
   newAddressDefault: boolean;
   savingAddress: boolean;
+  savingDriverProfile: boolean;
   onNewAddressLabel: (value: string) => void;
   onNewAddressText: (value: string) => void;
   onNewAddressDefault: (value: boolean) => void;
   onSaveAddress: (event: FormEvent<HTMLFormElement>) => Promise<void>;
   onSetDefaultAddress: (addressId: number) => void;
   onDeleteAddress: (addressId: number) => void;
+  onDriverProfileChange: (
+    patch: Partial<Pick<MiniAppDriverProfile, 'is_online' | 'accepts_delivery' | 'accepts_pickup'>>,
+  ) => void;
   onLogout: () => void;
 }) {
+  if (appRole === 'driver') {
+    return (
+      <section className="view-stack">
+        <article className="surface">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Account</p>
+              <h2>Private driver profile</h2>
+            </div>
+            <button className="secondary-button" onClick={onLogout}>
+              Logout
+            </button>
+          </div>
+          <dl className="detail-grid">
+            <DetailItem label="Invite" value={customer?.invite_code || 'Pending'} />
+            <DetailItem label="Role" value={humanize(appRole)} />
+            <DetailItem label="Status" value={driverProfile?.is_online ? 'Online' : 'Offline'} />
+            <DetailItem label="Last Login" value={formatDateTime(customer?.last_login_at)} />
+          </dl>
+        </article>
+
+        <div className="feature-grid account-grid">
+          <article className="surface">
+            <div className="section-head compact">
+              <div>
+                <p className="eyebrow">Availability</p>
+                <h3>Dispatch controls</h3>
+              </div>
+            </div>
+
+            <div className="driver-toggle-grid">
+              <button
+                className={`toggle-button ${driverProfile?.is_online ? 'active' : ''}`}
+                disabled={savingDriverProfile}
+                onClick={() => onDriverProfileChange({ is_online: !driverProfile?.is_online })}
+                type="button"
+              >
+                {driverProfile?.is_online ? 'Online' : 'Offline'}
+              </button>
+              <button
+                className={`toggle-button ${driverProfile?.accepts_delivery ? 'active' : ''}`}
+                disabled={savingDriverProfile}
+                onClick={() => onDriverProfileChange({ accepts_delivery: !driverProfile?.accepts_delivery })}
+                type="button"
+              >
+                Delivery
+              </button>
+              <button
+                className={`toggle-button ${driverProfile?.accepts_pickup ? 'active' : ''}`}
+                disabled={savingDriverProfile}
+                onClick={() => onDriverProfileChange({ accepts_pickup: !driverProfile?.accepts_pickup })}
+                type="button"
+              >
+                Pickup
+              </button>
+            </div>
+
+            <dl className="detail-grid">
+              <DetailItem label="Capacity" value={`${driverProfile?.max_concurrent_orders || 1} active orders`} />
+              <DetailItem label="Range" value={`${driverProfile?.max_delivery_distance_miles || 15} mi`} />
+              <DetailItem
+                label="Pickup Hub"
+                value={driverProfile?.pickup_address ? `${driverProfile.pickup_address.name}` : 'Not assigned'}
+              />
+              <DetailItem label="Hub Address" value={driverProfile?.pickup_address?.address || 'Not assigned'} />
+            </dl>
+          </article>
+
+          <article className="surface">
+            <div className="section-head compact">
+              <div>
+                <p className="eyebrow">Support</p>
+                <h3>Dispatch contact</h3>
+              </div>
+            </div>
+            <p className="muted-copy">{supportText}</p>
+          </article>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section className="view-stack">
       <article className="surface">
@@ -1490,9 +1854,9 @@ function StatTile({ label, value, tone = 'default' }: { label: string; value: st
 
 function StatusPill({ tone, children }: { tone: string; children: string }) {
   const normalizedTone =
-    tone === 'approved' || tone === 'delivered'
+    tone === 'approved' || tone === 'delivered' || tone === 'out_for_delivery'
       ? 'approved'
-      : tone === 'pending' || tone === 'placed'
+      : tone === 'pending' || tone === 'placed' || tone === 'assigned' || tone === 'preparing' || tone === 'ready' || tone === 'scheduled'
         ? 'pending'
         : tone === 'cancelled'
           ? 'cancelled'

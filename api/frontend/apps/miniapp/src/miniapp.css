@@ -129,6 +129,10 @@ button {
   align-items: start;
 }
 
+.miniapp-layout.driver-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .content-column,
 .view-stack,
 .stack,
@@ -233,6 +237,12 @@ button {
   align-items: flex-start;
 }
 
+.driver-toggle-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .section-head.compact {
   margin-bottom: 0;
 }
@@ -276,6 +286,10 @@ button {
 .summary-box span {
   color: var(--muted);
   font-size: 0.84rem;
+}
+
+.detail-item strong {
+  overflow-wrap: anywhere;
 }
 
 .stat-tile strong {
@@ -418,6 +432,10 @@ textarea {
   align-self: center;
 }
 
+.row-actions .helper-text {
+  margin: 0;
+}
+
 .quantity-control span {
   min-width: 24px;
   text-align: center;
@@ -521,7 +539,8 @@ textarea {
 
   .tabbar,
   .detail-grid,
-  .toggle-row {
+  .toggle-row,
+  .driver-toggle-grid {
     grid-template-columns: 1fr;
   }
 

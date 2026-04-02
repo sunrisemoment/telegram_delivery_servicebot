@@ -17,6 +17,7 @@ load_dotenv()
 
 SESSION_TTL_HOURS = int(os.getenv("MINI_APP_SESSION_TTL_HOURS", "24"))
 INIT_DATA_MAX_AGE_SECONDS = int(os.getenv("MINI_APP_INIT_DATA_MAX_AGE_SECONDS", "86400"))
+SUPPORTED_APP_ROLES = {"customer", "driver"}
 
 
 def normalize_invite_code(code: str | None) -> str | None:
@@ -24,6 +25,15 @@ def normalize_invite_code(code: str | None) -> str | None:
         return None
     normalized = "".join(char for char in code.upper().strip() if char.isalnum())
     return normalized or None
+
+
+def normalize_app_role(role: str | None, default: str | None = "customer") -> str | None:
+    normalized = (role or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not normalized:
+        return default
+    if normalized in SUPPORTED_APP_ROLES:
+        return normalized
+    return None
 
 
 def build_customer_display_name(user: dict) -> str:
