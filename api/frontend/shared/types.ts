@@ -83,11 +83,32 @@ export interface OrderSummary {
   delivery_slot_et?: string | null;
 }
 
+export interface PickupEtaUpdateSummary {
+  id: number;
+  eta_minutes: number;
+  note?: string | null;
+  source?: string | null;
+  customer_name?: string | null;
+  customer_telegram_id?: number | null;
+  created_at?: string | null;
+}
+
+export interface PickupArrivalPhotoSummary {
+  id: number;
+  photo_url: string;
+  parking_note?: string | null;
+  source?: string | null;
+  customer_name?: string | null;
+  customer_telegram_id?: number | null;
+  created_at?: string | null;
+}
+
 export interface OrderDetail {
   order_number: string;
   customer?: {
     telegram_id?: number | null;
     phone?: string | null;
+    display_name?: string | null;
   } | null;
   driver?: {
     name: string;
@@ -110,6 +131,10 @@ export interface OrderDetail {
   delivery_slot?: string | null;
   notes?: string | null;
   created_at?: string | null;
+  latest_pickup_eta?: PickupEtaUpdateSummary | null;
+  pickup_eta_updates?: PickupEtaUpdateSummary[];
+  latest_pickup_arrival_photo?: PickupArrivalPhotoSummary | null;
+  pickup_arrival_photos?: PickupArrivalPhotoSummary[];
 }
 
 export interface PickupAddressSummary {
@@ -320,4 +345,6 @@ export interface MiniAppOrder {
   created_at?: string | null;
   updated_at?: string | null;
   payment_metadata?: Record<string, unknown>;
+  latest_pickup_eta?: PickupEtaUpdateSummary | null;
+  latest_pickup_arrival_photo?: PickupArrivalPhotoSummary | null;
 }

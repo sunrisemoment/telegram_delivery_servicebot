@@ -67,6 +67,8 @@ def ensure_runtime_schema():
         "UPDATE orders SET payment_status = 'paid_confirmed' WHERE payment_status = 'paid' AND payment_confirmed = TRUE",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_alias_username ON customers(alias_username) WHERE alias_username IS NOT NULL",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_customers_alias_email ON customers(alias_email) WHERE alias_email IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_pickup_eta_updates_order_created_at ON pickup_eta_updates(order_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_pickup_arrival_photos_order_created_at ON pickup_arrival_photos(order_id, created_at DESC)",
     ]
 
     with engine.begin() as connection:

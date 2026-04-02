@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -114,3 +114,8 @@ class MiniAppDriverProfileUpdate(BaseModel):
 
 class MiniAppDriverOrderStatusUpdate(BaseModel):
     status: str
+
+
+class MiniAppPickupEtaUpdateCreate(BaseModel):
+    eta_minutes: int = Field(..., ge=1, le=240)
+    note: Optional[str] = None

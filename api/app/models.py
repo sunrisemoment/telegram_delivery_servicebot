@@ -142,6 +142,36 @@ class OrderEvent(Base):
     order = relationship("Order", backref="events")
 
 
+class PickupEtaUpdate(Base):
+    __tablename__ = "pickup_eta_updates"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    order_id = Column(BigInteger, ForeignKey("orders.id"), nullable=False, index=True)
+    customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    eta_minutes = Column(Integer, nullable=False)
+    note = Column(Text)
+    source = Column(String(20), default="miniapp")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    order = relationship("Order", backref="pickup_eta_updates")
+    customer = relationship("Customer", foreign_keys=[customer_id])
+
+
+class PickupArrivalPhoto(Base):
+    __tablename__ = "pickup_arrival_photos"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    order_id = Column(BigInteger, ForeignKey("orders.id"), nullable=False, index=True)
+    customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    photo_url = Column(Text, nullable=False)
+    parking_note = Column(Text)
+    source = Column(String(20), default="miniapp")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    order = relationship("Order", backref="pickup_arrival_photos")
+    customer = relationship("Customer", foreign_keys=[customer_id])
+
+
 class MiniAppSession(Base):
     __tablename__ = "miniapp_sessions"
 

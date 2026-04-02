@@ -62,6 +62,15 @@ function clearAdminToken(): void {
   localStorage.removeItem(ADMIN_AUTH_STORAGE_KEY);
 }
 
+function formatPickupEtaSummary(
+  pickupEta: OrderDetail['latest_pickup_eta'] | undefined | null,
+): string {
+  if (!pickupEta) {
+    return 'Not shared';
+  }
+  return `${pickupEta.eta_minutes} min • ${formatDateTime(pickupEta.created_at)}`;
+}
+
 function App() {
   const [token, setToken] = useState<string>(getStoredAdminToken);
   const [activeView, setActiveView] = useState<ViewKey>('dashboard');
@@ -474,7 +483,14 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
             </div>
 
             <dl className="detail-grid">
-              <DetailItem label="Customer" value={`${selectedOrder.customer?.telegram_id ?? 'N/A'}`} />
+              <DetailItem
+                label="Customer"
+                value={
+                  selectedOrder.customer?.display_name
+                    ? `${selectedOrder.customer.display_name} • ${selectedOrder.customer.telegram_id ?? 'N/A'}`
+                    : `${selectedOrder.customer?.telegram_id ?? 'N/A'}`
+                }
+              />
               <DetailItem label="Payment" value={humanize(selectedOrder.payment_type)} />
               <DetailItem label="Approved" value={selectedOrder.payment_confirmed ? 'Yes' : 'No'} />
               <DetailItem label="Created" value={formatDateTime(selectedOrder.created_at)} />
@@ -500,6 +516,90 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
               <h4>Routing</h4>
               <p>{selectedOrder.delivery_address || selectedOrder.pickup_address || 'Address not available'}</p>
             </div>
+
+            {selectedOrder.delivery_type === 'pickup' ? (
+              <div className="detail-block">
+                <h4>Pickup Coordination</h4>
+                <dl className="detail-grid">
+                  <DetailItem label="Latest ETA" value={formatPickupEtaSummary(selectedOrder.latest_pickup_eta)} />
+                  <DetailItem
+                    label="Arrival Proof"
+                    value={
+                      selectedOrder.latest_pickup_arrival_photo
+                        ? `Uploaded • ${formatDateTime(selectedOrder.latest_pickup_arrival_photo.created_at)}`
+                        : 'Not uploaded'
+                    }
+                  />
+                </dl>
+
+                {selectedOrder.latest_pickup_eta?.note ? (
+                  <p className="detail-copy">Customer ETA note: {selectedOrder.latest_pickup_eta.note}</p>
+                ) : null}
+
+                {selectedOrder.latest_pickup_arrival_photo ? (
+                  <div className="evidence-grid">
+                    <img
+                      className="evidence-image"
+                      src={selectedOrder.latest_pickup_arrival_photo.photo_url}
+                      alt={`Pickup arrival proof for ${selectedOrder.order_number}`}
+                    />
+                    <div className="stack">
+                      <p className="detail-copy">
+                        Latest proof from{' '}
+                        {selectedOrder.latest_pickup_arrival_photo.customer_name
+                          || selectedOrder.latest_pickup_arrival_photo.customer_telegram_id
+                          || 'customer'}
+                        .
+                      </p>
+                      {selectedOrder.latest_pickup_arrival_photo.parking_note ? (
+                        <p className="detail-copy">
+                          Parking note: {selectedOrder.latest_pickup_arrival_photo.parking_note}
+                        </p>
+                      ) : null}
+                      <a
+                        className="text-link"
+                        href={selectedOrder.latest_pickup_arrival_photo.photo_url}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        Open full image
+                      </a>
+                    </div>
+                  </div>
+                ) : null}
+
+                {selectedOrder.pickup_eta_updates?.length ? (
+                  <div className="detail-block">
+                    <h4>ETA History</h4>
+                    <ul className="detail-list">
+                      {selectedOrder.pickup_eta_updates.map((update) => (
+                        <li key={`eta-${update.id}`}>
+                          <span>
+                            {update.eta_minutes} min
+                            {update.note ? ` • ${update.note}` : ''}
+                          </span>
+                          <strong>{formatDateTime(update.created_at)}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+
+                {selectedOrder.pickup_arrival_photos?.length ? (
+                  <div className="detail-block">
+                    <h4>Arrival Proof History</h4>
+                    <ul className="detail-list">
+                      {selectedOrder.pickup_arrival_photos.map((photo) => (
+                        <li key={`pickup-photo-${photo.id}`}>
+                          <span>{photo.parking_note || 'Arrival photo uploaded'}</span>
+                          <strong>{formatDateTime(photo.created_at)}</strong>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
 
             {!selectedOrder.payment_confirmed ? (
               <button className="primary-button" onClick={() => void markPaid(selectedOrder.order_number)}>

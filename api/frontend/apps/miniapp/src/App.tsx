@@ -203,6 +203,13 @@ function buildSupportText(config: MiniAppConfig | null): string {
   return parts.join(' • ') || 'Support contact is not configured yet.';
 }
 
+function formatPickupEtaValue(order: MiniAppOrder): string {
+  if (!order.latest_pickup_eta) {
+    return 'Not shared yet';
+  }
+  return `${order.latest_pickup_eta.eta_minutes} min away • ${formatDateTime(order.latest_pickup_eta.created_at)}`;
+}
+
 function openExternalLink(url: string): void {
   const telegram = getTelegramApp();
   if (telegram?.openLink) {
@@ -225,6 +232,8 @@ function App() {
   const [savingAddress, setSavingAddress] = useState(false);
   const [savingDriverProfile, setSavingDriverProfile] = useState(false);
   const [driverActionOrderNumber, setDriverActionOrderNumber] = useState('');
+  const [pickupEtaOrderNumber, setPickupEtaOrderNumber] = useState('');
+  const [pickupPhotoOrderNumber, setPickupPhotoOrderNumber] = useState('');
   const [activeView, setActiveView] = useState<ViewKey>('home');
   const [authStatus, setAuthStatus] = useState('Waiting for Telegram Mini App context.');
   const [authTone, setAuthTone] = useState<AuthTone>('default');
@@ -467,6 +476,67 @@ function App() {
       getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
     } finally {
       setDriverActionOrderNumber('');
+    }
+  }
+
+  async function submitPickupEta(orderNumber: string, etaMinutes: number, note?: string) {
+    if (!sessionToken || isDriverApp) {
+      return;
+    }
+
+    setPickupEtaOrderNumber(orderNumber);
+    try {
+      await miniappRequest(sessionToken, `/orders/${orderNumber}/pickup-eta`, {
+        method: 'POST',
+        body: JSON.stringify({
+          eta_minutes: etaMinutes,
+          note: note?.trim() || null,
+        }),
+      });
+      await refreshOrders(sessionToken);
+      pushToast(`Pickup ETA sent for ${orderNumber}`);
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setPickupEtaOrderNumber('');
+    }
+  }
+
+  async function uploadPickupArrivalPhoto(orderNumber: string, photo: File, parkingNote?: string) {
+    if (!sessionToken || isDriverApp) {
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('photo', photo);
+    if (parkingNote?.trim()) {
+      formData.append('parking_note', parkingNote.trim());
+    }
+
+    setPickupPhotoOrderNumber(orderNumber);
+    try {
+      await miniappRequest(sessionToken, `/orders/${orderNumber}/pickup-arrival-photo`, {
+        method: 'POST',
+        body: formData,
+      });
+      await refreshOrders(sessionToken);
+      pushToast(`Pickup arrival proof uploaded for ${orderNumber}`);
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setPickupPhotoOrderNumber('');
     }
   }
 
@@ -948,8 +1018,12 @@ function App() {
                 appRole={appRole}
                 orders={orders}
                 busyOrderNumber={driverActionOrderNumber}
+                pickupEtaBusyOrderNumber={pickupEtaOrderNumber}
+                pickupPhotoBusyOrderNumber={pickupPhotoOrderNumber}
                 onRefresh={() => void refreshOrders()}
-                onDriverStatusChange={(orderNumber, status) => void updateDriverOrderStatus(orderNumber, status)}
+                onDriverStatusChange={updateDriverOrderStatus}
+                onPickupEtaUpdate={submitPickupEta}
+                onPickupArrivalUpload={uploadPickupArrivalPhoto}
               />
             ) : null}
 
@@ -1274,15 +1348,48 @@ function OrdersView({
   appRole,
   orders,
   busyOrderNumber,
+  pickupEtaBusyOrderNumber,
+  pickupPhotoBusyOrderNumber,
   onRefresh,
   onDriverStatusChange,
+  onPickupEtaUpdate,
+  onPickupArrivalUpload,
 }: {
   appRole: MiniAppRole;
   orders: MiniAppOrder[];
   busyOrderNumber: string;
+  pickupEtaBusyOrderNumber: string;
+  pickupPhotoBusyOrderNumber: string;
   onRefresh: () => void;
-  onDriverStatusChange: (orderNumber: string, status: 'out_for_delivery' | 'delivered') => void;
+  onDriverStatusChange: (orderNumber: string, status: 'out_for_delivery' | 'delivered') => Promise<void>;
+  onPickupEtaUpdate: (orderNumber: string, etaMinutes: number, note?: string) => Promise<void>;
+  onPickupArrivalUpload: (orderNumber: string, photo: File, parkingNote?: string) => Promise<void>;
 }) {
+  async function handlePickupEtaSubmit(event: FormEvent<HTMLFormElement>, orderNumber: string) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const etaMinutes = Number(formData.get('eta_minutes'));
+    const note = String(formData.get('note') || '');
+    if (!Number.isFinite(etaMinutes) || etaMinutes < 1) {
+      return;
+    }
+
+    await onPickupEtaUpdate(orderNumber, etaMinutes, note);
+    event.currentTarget.reset();
+  }
+
+  async function handlePickupArrivalSubmit(event: FormEvent<HTMLFormElement>, orderNumber: string) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const photo = formData.get('photo');
+    if (!(photo instanceof File) || photo.size <= 0) {
+      return;
+    }
+
+    await onPickupArrivalUpload(orderNumber, photo, String(formData.get('parking_note') || ''));
+    event.currentTarget.reset();
+  }
+
   if (appRole === 'driver') {
     return (
       <section className="view-stack">
@@ -1332,6 +1439,58 @@ function OrdersView({
                   </dl>
 
                   {order.notes ? <p className="helper-text">{order.notes}</p> : null}
+
+                  {order.delivery_or_pickup === 'pickup' ? (
+                    <div className="pickup-signal-panel">
+                      <div className="section-head compact">
+                        <div>
+                          <p className="eyebrow">Pickup Signal</p>
+                          <h4>{formatPickupEtaValue(order)}</h4>
+                        </div>
+                        <span className="badge">
+                          {order.latest_pickup_arrival_photo ? 'Arrival photo uploaded' : 'Waiting on arrival photo'}
+                        </span>
+                      </div>
+
+                      {order.latest_pickup_eta?.note ? (
+                        <p className="helper-text">Latest customer note: {order.latest_pickup_eta.note}</p>
+                      ) : null}
+
+                      {order.latest_pickup_arrival_photo ? (
+                        <div className="pickup-proof">
+                          <img
+                            className="pickup-proof-image"
+                            src={order.latest_pickup_arrival_photo.photo_url}
+                            alt={`Pickup proof for ${order.order_number}`}
+                          />
+                          <div className="stack">
+                            <p className="helper-text">
+                              Uploaded {formatDateTime(order.latest_pickup_arrival_photo.created_at)} by{' '}
+                              {order.latest_pickup_arrival_photo.customer_name
+                                || order.latest_pickup_arrival_photo.customer_telegram_id
+                                || 'customer'}
+                              .
+                            </p>
+                            {order.latest_pickup_arrival_photo.parking_note ? (
+                              <p className="helper-text">
+                                Parking note: {order.latest_pickup_arrival_photo.parking_note}
+                              </p>
+                            ) : null}
+                            <a
+                              className="pickup-proof-link"
+                              href={order.latest_pickup_arrival_photo.photo_url}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open full image
+                            </a>
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="helper-text">The customer has not uploaded arrival proof yet.</p>
+                      )}
+                    </div>
+                  ) : null}
 
                   <div className="row-actions">
                     {canStartDelivery ? (
@@ -1411,6 +1570,112 @@ function OrdersView({
               </dl>
 
               {order.notes ? <p className="helper-text">{order.notes}</p> : null}
+
+              {order.delivery_or_pickup === 'pickup' ? (
+                <div className="pickup-signal-panel">
+                  <div className="section-head compact">
+                    <div>
+                      <p className="eyebrow">Pickup Coordination</p>
+                      <h4>{formatPickupEtaValue(order)}</h4>
+                    </div>
+                    <span className="badge">
+                      {order.latest_pickup_arrival_photo ? 'Arrival photo on file' : 'Share arrival photo'}
+                    </span>
+                  </div>
+
+                  {order.latest_pickup_eta?.note ? (
+                    <p className="helper-text">Latest ETA note: {order.latest_pickup_eta.note}</p>
+                  ) : (
+                    <p className="helper-text">
+                      Share your ETA and parking photo here so the driver can stage your pickup handoff.
+                    </p>
+                  )}
+
+                  {order.latest_pickup_arrival_photo ? (
+                    <div className="pickup-proof">
+                      <img
+                        className="pickup-proof-image"
+                        src={order.latest_pickup_arrival_photo.photo_url}
+                        alt={`Pickup proof for ${order.order_number}`}
+                      />
+                      <div className="stack">
+                        <p className="helper-text">
+                          Last uploaded {formatDateTime(order.latest_pickup_arrival_photo.created_at)}.
+                        </p>
+                        {order.latest_pickup_arrival_photo.parking_note ? (
+                          <p className="helper-text">
+                            Parking note: {order.latest_pickup_arrival_photo.parking_note}
+                          </p>
+                        ) : null}
+                        <a
+                          className="pickup-proof-link"
+                          href={order.latest_pickup_arrival_photo.photo_url}
+                          rel="noreferrer"
+                          target="_blank"
+                        >
+                          Open image
+                        </a>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {['cancelled', 'delivered'].includes(order.status) ? (
+                    <p className="helper-text">Pickup coordination is closed for this order.</p>
+                  ) : (
+                    <div className="pickup-action-grid">
+                      <form
+                        className="pickup-form"
+                        onSubmit={(event) => void handlePickupEtaSubmit(event, order.order_number)}
+                      >
+                        <label className="field">
+                          <span>ETA in minutes</span>
+                          <input defaultValue={15} max={240} min={1} name="eta_minutes" step={5} type="number" />
+                        </label>
+                        <label className="field">
+                          <span>ETA note</span>
+                          <textarea
+                            name="note"
+                            placeholder="Gate, vehicle, or timing note"
+                            rows={2}
+                          />
+                        </label>
+                        <button
+                          className="secondary-button compact-button"
+                          disabled={pickupEtaBusyOrderNumber === order.order_number}
+                          type="submit"
+                        >
+                          {pickupEtaBusyOrderNumber === order.order_number ? 'Sending…' : 'Share ETA'}
+                        </button>
+                      </form>
+
+                      <form
+                        className="pickup-form"
+                        onSubmit={(event) => void handlePickupArrivalSubmit(event, order.order_number)}
+                      >
+                        <label className="field">
+                          <span>Arrival photo</span>
+                          <input accept="image/*" name="photo" required type="file" />
+                        </label>
+                        <label className="field">
+                          <span>Parking note</span>
+                          <textarea
+                            name="parking_note"
+                            placeholder="Parking lot, vehicle color, or landmark"
+                            rows={2}
+                          />
+                        </label>
+                        <button
+                          className="primary-button compact-button"
+                          disabled={pickupPhotoBusyOrderNumber === order.order_number}
+                          type="submit"
+                        >
+                          {pickupPhotoBusyOrderNumber === order.order_number ? 'Uploading…' : 'Upload Arrival Proof'}
+                        </button>
+                      </form>
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </article>
           ))}
         </div>

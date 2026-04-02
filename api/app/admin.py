@@ -87,6 +87,30 @@ def _serialize_invite(invite: models.CustomerInvite) -> dict:
     }
 
 
+def _serialize_pickup_eta_update(update: models.PickupEtaUpdate) -> dict:
+    return {
+        "id": update.id,
+        "eta_minutes": update.eta_minutes,
+        "note": update.note,
+        "source": update.source,
+        "customer_name": update.customer.display_name if update.customer else None,
+        "customer_telegram_id": update.customer.telegram_id if update.customer else None,
+        "created_at": update.created_at.isoformat() if update.created_at else None,
+    }
+
+
+def _serialize_pickup_arrival_photo(photo: models.PickupArrivalPhoto) -> dict:
+    return {
+        "id": photo.id,
+        "photo_url": photo.photo_url,
+        "parking_note": photo.parking_note,
+        "source": photo.source,
+        "customer_name": photo.customer.display_name if photo.customer else None,
+        "customer_telegram_id": photo.customer.telegram_id if photo.customer else None,
+        "created_at": photo.created_at.isoformat() if photo.created_at else None,
+    }
+
+
 def _normalize_alias_username(alias_username: str | None) -> str | None:
     if not alias_username:
         return None
@@ -366,12 +390,19 @@ async def get_order_details(order_number: str, db: Session = Depends(get_db), ad
     customer = db.query(models.Customer).filter(models.Customer.id == order.customer_id).first()
     driver = db.query(models.Driver).filter(models.Driver.id == order.driver_id).first() if order.driver_id else None
     events = db.query(models.OrderEvent).filter(models.OrderEvent.order_id == order.id).order_by(models.OrderEvent.created_at).all()
+    pickup_eta_updates = db.query(models.PickupEtaUpdate).filter(
+        models.PickupEtaUpdate.order_id == order.id
+    ).order_by(models.PickupEtaUpdate.created_at.desc()).all()
+    pickup_arrival_photos = db.query(models.PickupArrivalPhoto).filter(
+        models.PickupArrivalPhoto.order_id == order.id
+    ).order_by(models.PickupArrivalPhoto.created_at.desc()).all()
     
     return {
         "order_number": order.order_number,
         "customer": {
             "telegram_id": customer.telegram_id,
-            "phone": customer.phone
+            "phone": customer.phone,
+            "display_name": customer.display_name,
         } if customer else None,
         "driver": {
             "name": driver.name,
@@ -396,6 +427,10 @@ async def get_order_details(order_number: str, db: Session = Depends(get_db), ad
         "delivery_slot": order.delivery_slot_et.isoformat() if order.delivery_slot_et else None,
         "notes": order.notes,
         "created_at": order.created_at.isoformat(),
+        "latest_pickup_eta": _serialize_pickup_eta_update(pickup_eta_updates[0]) if pickup_eta_updates else None,
+        "pickup_eta_updates": [_serialize_pickup_eta_update(update) for update in pickup_eta_updates],
+        "latest_pickup_arrival_photo": _serialize_pickup_arrival_photo(pickup_arrival_photos[0]) if pickup_arrival_photos else None,
+        "pickup_arrival_photos": [_serialize_pickup_arrival_photo(photo) for photo in pickup_arrival_photos],
         "events": [
             {
                 "type": event.type,

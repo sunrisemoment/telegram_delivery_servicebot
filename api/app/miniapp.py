@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
 from html import escape
+from pathlib import Path
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from . import crud, models, schemas
@@ -28,6 +30,11 @@ from .payment_service import get_payment_service
 from .telegram_service import telegram_service
 
 router = APIRouter(prefix="/miniapp-api", tags=["miniapp"])
+
+MAX_PICKUP_UPLOAD_BYTES = 10 * 1024 * 1024
+BASE_DIR = Path(__file__).resolve().parent.parent
+PICKUP_UPLOAD_DIR = BASE_DIR / "static" / "uploads" / "pickup-arrivals"
+PICKUP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _serialize_customer(customer: models.Customer) -> dict:
@@ -57,6 +64,62 @@ def _serialize_address(address: models.CustomerAddress) -> dict:
     }
 
 
+def _serialize_pickup_eta_update(update: models.PickupEtaUpdate) -> dict:
+    return {
+        "id": update.id,
+        "eta_minutes": update.eta_minutes,
+        "note": update.note,
+        "source": update.source,
+        "customer_name": update.customer.display_name if update.customer else None,
+        "customer_telegram_id": update.customer.telegram_id if update.customer else None,
+        "created_at": update.created_at.isoformat() if update.created_at else None,
+    }
+
+
+def _serialize_pickup_arrival_photo(photo: models.PickupArrivalPhoto) -> dict:
+    return {
+        "id": photo.id,
+        "photo_url": photo.photo_url,
+        "parking_note": photo.parking_note,
+        "source": photo.source,
+        "customer_name": photo.customer.display_name if photo.customer else None,
+        "customer_telegram_id": photo.customer.telegram_id if photo.customer else None,
+        "created_at": photo.created_at.isoformat() if photo.created_at else None,
+    }
+
+
+def _build_pickup_context(order: models.Order, include_history: bool = False) -> dict:
+    if order.delivery_or_pickup != "pickup":
+        payload = {
+            "latest_pickup_eta": None,
+            "latest_pickup_arrival_photo": None,
+        }
+        if include_history:
+            payload["pickup_eta_updates"] = []
+            payload["pickup_arrival_photos"] = []
+        return payload
+
+    eta_updates = sorted(
+        list(getattr(order, "pickup_eta_updates", []) or []),
+        key=lambda update: update.created_at.isoformat() if update.created_at else "",
+        reverse=True,
+    )
+    arrival_photos = sorted(
+        list(getattr(order, "pickup_arrival_photos", []) or []),
+        key=lambda photo: photo.created_at.isoformat() if photo.created_at else "",
+        reverse=True,
+    )
+
+    payload = {
+        "latest_pickup_eta": _serialize_pickup_eta_update(eta_updates[0]) if eta_updates else None,
+        "latest_pickup_arrival_photo": _serialize_pickup_arrival_photo(arrival_photos[0]) if arrival_photos else None,
+    }
+    if include_history:
+        payload["pickup_eta_updates"] = [_serialize_pickup_eta_update(update) for update in eta_updates]
+        payload["pickup_arrival_photos"] = [_serialize_pickup_arrival_photo(photo) for photo in arrival_photos]
+    return payload
+
+
 def _serialize_order(order: models.Order) -> dict:
     return {
         "id": order.id,
@@ -81,6 +144,7 @@ def _serialize_order(order: models.Order) -> dict:
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         "payment_metadata": order.payment_metadata or {},
+        **_build_pickup_context(order),
     }
 
 
@@ -92,6 +156,42 @@ def _require_customer_role(customer: models.Customer) -> models.Customer:
     if _resolve_customer_role(customer) != "customer":
         raise HTTPException(status_code=403, detail="This Mini App account is configured for driver access")
     return customer
+
+
+def _require_customer_pickup_order(
+    db: Session,
+    customer: models.Customer,
+    order_number: str,
+) -> models.Order:
+    _require_customer_role(customer)
+    order = db.query(models.Order).filter(
+        models.Order.order_number == order_number,
+        models.Order.customer_id == customer.id,
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Pickup order not found")
+    if order.delivery_or_pickup != "pickup":
+        raise HTTPException(status_code=400, detail="This workflow is only available for pickup orders")
+
+    current_status = normalize_order_status(order.status)
+    if current_status in {"cancelled", "delivered"}:
+        raise HTTPException(status_code=409, detail=f"Pickup updates are closed for {current_status} orders")
+    return order
+
+
+def _resolve_pickup_upload_extension(photo: UploadFile) -> str:
+    suffix = Path(photo.filename or "").suffix.lower()
+    if suffix in {".jpg", ".jpeg", ".png", ".webp", ".heic"}:
+        return ".jpg" if suffix == ".jpeg" else suffix
+
+    content_type = (photo.content_type or "").lower()
+    mapping = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/heic": ".heic",
+    }
+    return mapping.get(content_type, ".jpg")
 
 
 def _ensure_driver_profile(
@@ -724,6 +824,133 @@ async def miniapp_create_order(
         "payment_url": payment_url,
         "payment_label": get_payment_label(payment_type),
         "message": "Order created. Payment approval is required before dispatch.",
+    }
+
+
+@router.post("/orders/{order_number}/pickup-eta")
+async def miniapp_create_pickup_eta_update(
+    order_number: str,
+    eta_data: schemas.MiniAppPickupEtaUpdateCreate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    order = _require_customer_pickup_order(db, customer, order_number)
+    eta_note = (eta_data.note or "").strip() or None
+
+    pickup_eta_update = models.PickupEtaUpdate(
+        order_id=order.id,
+        customer_id=customer.id,
+        eta_minutes=eta_data.eta_minutes,
+        note=eta_note,
+        source="miniapp",
+    )
+    order.updated_at = datetime.now(timezone.utc)
+    db.add(pickup_eta_update)
+    db.add(
+        models.OrderEvent(
+            order_id=order.id,
+            type="pickup_eta_updated",
+            payload={
+                "customer_id": customer.id,
+                "customer_telegram_id": customer.telegram_id,
+                "eta_minutes": eta_data.eta_minutes,
+                "note": eta_note,
+                "source": "miniapp",
+            },
+        )
+    )
+    db.commit()
+    db.refresh(pickup_eta_update)
+    order = db.query(models.Order).filter(models.Order.id == order.id).first()
+
+    if order and order.driver and order.driver.telegram_id:
+        note_text = f"\n📝 <b>Customer note:</b> {escape(eta_note)}" if eta_note else ""
+        telegram_service.send_message(
+            order.driver.telegram_id,
+            (
+                "⏱️ <b>Pickup ETA Updated</b>\n\n"
+                f"📦 <b>Order #:</b> <code>{order.order_number}</code>\n"
+                f"🚗 <b>Customer ETA:</b> {eta_data.eta_minutes} minutes{note_text}"
+            ),
+        )
+
+    return {
+        "message": "Pickup ETA shared with dispatch",
+        "pickup_eta": _serialize_pickup_eta_update(pickup_eta_update),
+        "order": _serialize_order(order),
+    }
+
+
+@router.post("/orders/{order_number}/pickup-arrival-photo")
+async def miniapp_upload_pickup_arrival_photo(
+    order_number: str,
+    photo: UploadFile = File(...),
+    parking_note: str | None = Form(None),
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    order = _require_customer_pickup_order(db, customer, order_number)
+    photo_suffix = Path(photo.filename or "").suffix.lower()
+    if not ((photo.content_type or "").lower().startswith("image/") or photo_suffix in {".jpg", ".jpeg", ".png", ".webp", ".heic"}):
+        raise HTTPException(status_code=400, detail="Pickup arrival proof must be an image")
+
+    photo_bytes = await photo.read()
+    if not photo_bytes:
+        raise HTTPException(status_code=400, detail="Upload an image before submitting")
+    if len(photo_bytes) > MAX_PICKUP_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Pickup arrival image must be 10 MB or smaller")
+
+    filename = f"pickup_{order.order_number.lower()}_{uuid4().hex}{_resolve_pickup_upload_extension(photo)}"
+    destination = PICKUP_UPLOAD_DIR / filename
+    destination.write_bytes(photo_bytes)
+    photo_url = f"/static/uploads/pickup-arrivals/{filename}"
+    normalized_parking_note = (parking_note or "").strip() or None
+
+    arrival_photo = models.PickupArrivalPhoto(
+        order_id=order.id,
+        customer_id=customer.id,
+        photo_url=photo_url,
+        parking_note=normalized_parking_note,
+        source="miniapp",
+    )
+    order.updated_at = datetime.now(timezone.utc)
+    db.add(arrival_photo)
+    db.add(
+        models.OrderEvent(
+            order_id=order.id,
+            type="pickup_arrival_photo_uploaded",
+            payload={
+                "customer_id": customer.id,
+                "customer_telegram_id": customer.telegram_id,
+                "photo_url": photo_url,
+                "parking_note": normalized_parking_note,
+                "source": "miniapp",
+            },
+        )
+    )
+    db.commit()
+    db.refresh(arrival_photo)
+    order = db.query(models.Order).filter(models.Order.id == order.id).first()
+
+    if order and order.driver and order.driver.telegram_id:
+        note_text = (
+            f"\n📝 <b>Parking note:</b> {escape(normalized_parking_note)}"
+            if normalized_parking_note else ""
+        )
+        telegram_service.send_message(
+            order.driver.telegram_id,
+            (
+                "📸 <b>Pickup Arrival Proof Uploaded</b>\n\n"
+                f"📦 <b>Order #:</b> <code>{order.order_number}</code>\n"
+                "The customer uploaded an arrival photo in the Mini App."
+                f"{note_text}"
+            ),
+        )
+
+    return {
+        "message": "Pickup arrival proof uploaded",
+        "pickup_arrival_photo": _serialize_pickup_arrival_photo(arrival_photo),
+        "order": _serialize_order(order),
     }
 
 

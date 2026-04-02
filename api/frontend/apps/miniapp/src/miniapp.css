@@ -470,6 +470,55 @@ textarea {
   font-size: 1.2rem;
 }
 
+.pickup-signal-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(30, 25, 18, 0.08);
+}
+
+.pickup-action-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.pickup-form {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(30, 25, 18, 0.08);
+}
+
+.pickup-proof {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 144px) minmax(0, 1fr);
+  align-items: start;
+}
+
+.pickup-proof-image {
+  width: 100%;
+  border-radius: 18px;
+  border: 1px solid rgba(30, 25, 18, 0.08);
+  object-fit: cover;
+}
+
+.pickup-proof-link {
+  color: var(--olive);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.pickup-proof-link:hover {
+  text-decoration: underline;
+}
+
 .toast {
   position: fixed;
   left: 50%;
@@ -547,7 +596,8 @@ textarea {
   .toolbar,
   .status-row,
   .row-actions,
-  .menu-item-footer {
+  .menu-item-footer,
+  .pickup-proof {
     flex-direction: column;
     align-items: stretch;
   }
@@ -555,5 +605,10 @@ textarea {
   .quantity-control {
     align-self: stretch;
     justify-content: space-between;
+  }
+
+  .pickup-action-grid,
+  .pickup-proof {
+    grid-template-columns: 1fr;
   }
 }
