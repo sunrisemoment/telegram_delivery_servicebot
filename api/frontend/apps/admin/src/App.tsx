@@ -1,24 +1,30 @@
 import { startTransition, useDeferredValue, useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 
-import { ApiError, buildBasicAuthToken, extractErrorMessage } from '@shared/api';
+import { ApiError, extractErrorMessage } from '@shared/api';
 import { formatCurrency, formatDate, formatDateTime, humanize } from '@shared/format';
 import type {
+  AdminSessionSummary,
   CustomerSummary,
   DashboardStats,
   DriverSummary,
+  DriverWorkingHourSummary,
+  DriverWorkingHoursResponse,
   InviteSummary,
   OrderDetail,
   OrderSummary,
 } from '@shared/types';
 
-import { adminRequest, isMobileViewport } from './admin-api';
+import { adminRequest, isMobileViewport, loginAdmin, logoutAdmin } from './admin-api';
 import ContactView from './ContactView';
 import InventoryView from './InventoryView';
 import MenuManagementView from './MenuManagementView';
 import PaymentsView from './PaymentsView';
 import PickupView from './PickupView';
+import ReferralsView from './ReferralsView';
 import SettingsView from './SettingsView';
+import SupportView from './SupportView';
+import AuditView from './AuditView';
 import { DetailItem, EmptyPanel, ErrorPanel, LoadingPanel, StatCard, StatusPill, ViewErrorBoundary } from './admin-ui';
 
 const ADMIN_AUTH_STORAGE_KEY = 'delivery_bot.admin_auth';
@@ -34,7 +40,10 @@ type ViewKey =
   | 'inventory'
   | 'payments'
   | 'settings'
-  | 'contact';
+  | 'contact'
+  | 'support'
+  | 'referrals'
+  | 'audit';
 
 const NAV_ITEMS: Array<{ key: ViewKey; label: string; description: string }> = [
   { key: 'dashboard', label: 'Dashboard', description: 'Operational summary' },
@@ -48,7 +57,12 @@ const NAV_ITEMS: Array<{ key: ViewKey; label: string; description: string }> = [
   { key: 'payments', label: 'Payments', description: 'Approvals and BTC review' },
   { key: 'settings', label: 'Settings', description: 'Global payment controls' },
   { key: 'contact', label: 'Contact', description: 'Welcome and support' },
+  { key: 'support', label: 'Support', description: 'Customer and driver queue' },
+  { key: 'referrals', label: 'Referrals', description: 'Invite referral tracking' },
+  { key: 'audit', label: 'Audit', description: 'Security and operations log' },
 ];
+
+const WEEKDAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 function getStoredAdminToken(): string {
   return localStorage.getItem(ADMIN_AUTH_STORAGE_KEY) || '';
@@ -77,16 +91,17 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loginError, setLoginError] = useState<string>('');
   const [loginPending, setLoginPending] = useState(false);
+  const [sessionInfo, setSessionInfo] = useState<Pick<AdminSessionSummary, 'username' | 'expires_at'> | null>(null);
 
-  async function handleLogin(username: string, password: string) {
-    const nextToken = buildBasicAuthToken(username, password);
+  async function handleLogin(username: string, password: string, totpCode?: string) {
     setLoginPending(true);
     setLoginError('');
 
     try {
-      await adminRequest<DashboardStats>(nextToken, '/dashboard/stats');
-      storeAdminToken(nextToken);
-      setToken(nextToken);
+      const session = await loginAdmin(username, password, totpCode);
+      storeAdminToken(session.session_token);
+      setToken(session.session_token);
+      setSessionInfo({ username: session.username, expires_at: session.expires_at });
     } catch (error) {
       setLoginError(extractErrorMessage(error));
     } finally {
@@ -97,6 +112,21 @@ function App() {
   function handleUnauthorized() {
     clearAdminToken();
     setSidebarOpen(false);
+    setSessionInfo(null);
+    setToken('');
+  }
+
+  async function handleLogout() {
+    if (token) {
+      try {
+        await logoutAdmin(token);
+      } catch {
+        // Best-effort logout.
+      }
+    }
+    clearAdminToken();
+    setSidebarOpen(false);
+    setSessionInfo(null);
     setToken('');
   }
 
@@ -122,6 +152,32 @@ function App() {
       document.body.classList.remove('sidebar-locked');
     };
   }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (!token || sessionInfo) {
+      return;
+    }
+
+    let cancelled = false;
+    adminRequest<{ username: string; expires_at?: string | null }>(token, '/auth/me')
+      .then((response) => {
+        if (!cancelled) {
+          setSessionInfo({
+            username: response.username,
+            expires_at: response.expires_at || '',
+          });
+        }
+      })
+      .catch((cause) => {
+        if (cause instanceof ApiError && cause.status === 401) {
+          handleUnauthorized();
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, sessionInfo]);
 
   function handleViewChange(nextView: ViewKey) {
     startTransition(() => {
@@ -168,11 +224,7 @@ function App() {
 
         <button
           className="secondary-button logout-button"
-          onClick={() => {
-            clearAdminToken();
-            setSidebarOpen(false);
-            setToken('');
-          }}
+          onClick={() => void handleLogout()}
         >
           Logout
         </button>
@@ -190,7 +242,9 @@ function App() {
             </div>
           </div>
           <div className="page-header-actions">
-            <span className="page-chip">Basic Auth Session</span>
+            <span className="page-chip">
+              {sessionInfo?.username ? `${sessionInfo.username} • Expires ${formatDateTime(sessionInfo.expires_at)}` : 'Secure Session'}
+            </span>
           </div>
         </header>
 
@@ -209,6 +263,15 @@ function App() {
             <ContactView token={token} onUnauthorized={handleUnauthorized} />
           </ViewErrorBoundary>
         )}
+        {activeView === 'support' && (
+          <SupportView
+            adminUsername={sessionInfo?.username || 'admin'}
+            token={token}
+            onUnauthorized={handleUnauthorized}
+          />
+        )}
+        {activeView === 'referrals' && <ReferralsView token={token} onUnauthorized={handleUnauthorized} />}
+        {activeView === 'audit' && <AuditView token={token} onUnauthorized={handleUnauthorized} />}
       </main>
     </div>
   );
@@ -221,14 +284,15 @@ function LoginScreen({
 }: {
   pending: boolean;
   error: string;
-  onLogin: (username: string, password: string) => Promise<void>;
+  onLogin: (username: string, password: string, totpCode?: string) => Promise<void>;
 }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [totpCode, setTotpCode] = useState('');
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await onLogin(username, password);
+    await onLogin(username, password, totpCode);
   }
 
   return (
@@ -237,7 +301,7 @@ function LoginScreen({
         <p className="eyebrow">Delivery Bot</p>
         <h1>React Admin Console</h1>
         <p className="login-copy">
-          Sign in with the existing admin basic-auth credentials to manage dispatch, payments, invites, and customer operations.
+          Sign in with the admin credentials to create a secure session for dispatch, payments, invites, and customer operations.
         </p>
 
         <form className="stack" onSubmit={submit}>
@@ -252,6 +316,15 @@ function LoginScreen({
               value={password}
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="current-password"
+            />
+          </label>
+          <label className="field">
+            <span>TOTP code</span>
+            <input
+              inputMode="numeric"
+              placeholder="Optional unless required"
+              value={totpCode}
+              onChange={(event) => setTotpCode(event.target.value)}
             />
           </label>
           {error ? <div className="inline-error">{error}</div> : null}
@@ -323,6 +396,7 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
   const [selectedOrder, setSelectedOrder] = useState<OrderDetail | null>(null);
   const [drivers, setDrivers] = useState<DriverSummary[]>([]);
   const [selectedDriverId, setSelectedDriverId] = useState('');
+  const [dispatching, setDispatching] = useState(false);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [error, setError] = useState('');
@@ -395,6 +469,25 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
       await loadOrderDetails(selectedOrder.order_number);
     } catch (cause) {
       setError(extractErrorMessage(cause));
+    }
+  }
+
+  async function startDispatch() {
+    if (!selectedOrder) {
+      return;
+    }
+
+    setDispatching(true);
+    try {
+      await adminRequest(token, `/orders/${selectedOrder.order_number}/dispatch/start`, {
+        method: 'POST',
+      });
+      await loadOrders();
+      await loadOrderDetails(selectedOrder.order_number);
+    } catch (cause) {
+      setError(extractErrorMessage(cause));
+    } finally {
+      setDispatching(false);
     }
   }
 
@@ -601,12 +694,44 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
               </div>
             ) : null}
 
+            {selectedOrder.dispatch_queue || selectedOrder.dispatch_offers?.length ? (
+              <div className="detail-block">
+                <h4>Dispatch Queue</h4>
+                <dl className="detail-grid">
+                  <DetailItem label="Queue Status" value={humanize(selectedOrder.dispatch_queue?.status || 'not_started')} />
+                  <DetailItem
+                    label="Current Offer"
+                    value={
+                      selectedOrder.dispatch_offers?.find((offer) => offer.id === selectedOrder.dispatch_queue?.current_offer_id)?.driver_name
+                      || 'None'
+                    }
+                  />
+                </dl>
+
+                {selectedOrder.dispatch_offers?.length ? (
+                  <ul className="detail-list">
+                    {selectedOrder.dispatch_offers.map((offer) => (
+                      <li key={`dispatch-offer-${offer.id}`}>
+                        <span>
+                          #{offer.sequence_number} {offer.driver_name || `Driver ${offer.driver_id}`} • {humanize(offer.status)}
+                        </span>
+                        <strong>{formatDateTime(offer.offered_at || offer.responded_at)}</strong>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+
             {!selectedOrder.payment_confirmed ? (
               <button className="primary-button" onClick={() => void markPaid(selectedOrder.order_number)}>
                 Mark Payment Approved
               </button>
             ) : (
               <div className="stack">
+                <button className="secondary-button" disabled={dispatching} onClick={() => void startDispatch()} type="button">
+                  {dispatching ? 'Processing Queue…' : 'Start Offer Queue'}
+                </button>
                 <label className="field">
                   <span>Assign Driver</span>
                   <select value={selectedDriverId} onChange={(event) => setSelectedDriverId(event.target.value)}>
@@ -634,12 +759,70 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
 
 function DriversView({ token, onUnauthorized }: { token: string; onUnauthorized: () => void }) {
   const [drivers, setDrivers] = useState<DriverSummary[]>([]);
+  const [selectedDriverId, setSelectedDriverId] = useState<number | null>(null);
+  const [hoursForm, setHoursForm] = useState<{ timezone: string; hours: DriverWorkingHourSummary[] }>({
+    timezone: 'America/New_York',
+    hours: WEEKDAY_LABELS.map((_, index) => ({
+      day_of_week: index,
+      start_local_time: '09:00',
+      end_local_time: '17:00',
+      active: false,
+    })),
+  });
   const [error, setError] = useState('');
+  const [savingHours, setSavingHours] = useState(false);
+
+  const selectedDriver = drivers.find((driver) => driver.id === selectedDriverId) || null;
+
+  function buildHoursForm(payload?: DriverWorkingHoursResponse | null) {
+    const mapped = new Map<number, DriverWorkingHourSummary>();
+    for (const entry of payload?.hours || []) {
+      mapped.set(entry.day_of_week, entry);
+    }
+
+    return {
+      timezone: payload?.timezone || 'America/New_York',
+      hours: WEEKDAY_LABELS.map((_, index) => {
+        const entry = mapped.get(index);
+        return {
+          day_of_week: index,
+          start_local_time: entry?.start_local_time || '09:00',
+          end_local_time: entry?.end_local_time || '17:00',
+          active: entry?.active || false,
+        };
+      }),
+    };
+  }
+
+  async function loadWorkingHours(driverId: number) {
+    try {
+      const response = await adminRequest<DriverWorkingHoursResponse>(token, `/drivers/${driverId}/working-hours`);
+      setHoursForm(buildHoursForm(response));
+      setError('');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      setError(extractErrorMessage(cause));
+    }
+  }
 
   async function loadDrivers() {
     try {
       const response = await adminRequest<DriverSummary[]>(token, '/drivers?limit=100');
-      setDrivers(Array.isArray(response) ? response : []);
+      const items = Array.isArray(response) ? response : [];
+      setDrivers(items);
+      const nextSelectedId =
+        items.find((driver) => driver.id === selectedDriverId)?.id
+        || items[0]?.id
+        || null;
+      setSelectedDriverId(nextSelectedId);
+      if (nextSelectedId) {
+        await loadWorkingHours(nextSelectedId);
+      } else {
+        setHoursForm(buildHoursForm(null));
+      }
       setError('');
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
@@ -666,43 +849,204 @@ function DriversView({ token, onUnauthorized }: { token: string; onUnauthorized:
     }
   }
 
+  async function selectDriver(driverId: number) {
+    setSelectedDriverId(driverId);
+    await loadWorkingHours(driverId);
+  }
+
+  async function saveWorkingHours(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedDriver) {
+      return;
+    }
+
+    setSavingHours(true);
+    try {
+      const response = await adminRequest<DriverWorkingHoursResponse>(token, `/drivers/${selectedDriver.id}/working-hours`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          timezone: hoursForm.timezone.trim() || 'America/New_York',
+          hours: hoursForm.hours,
+        }),
+      });
+      setHoursForm(buildHoursForm(response));
+      await loadDrivers();
+      setError('');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      setError(extractErrorMessage(cause));
+    } finally {
+      setSavingHours(false);
+    }
+  }
+
   return (
-    <article className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Drivers</p>
-          <h3>Availability and dispatch limits</h3>
+    <section className="two-column-layout">
+      <article className="panel">
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Drivers</p>
+            <h3>Availability and dispatch limits</h3>
+          </div>
+          <button className="secondary-button" onClick={() => void loadDrivers()} type="button">
+            Refresh
+          </button>
         </div>
-        <button className="secondary-button" onClick={() => void loadDrivers()}>
-          Refresh
-        </button>
-      </div>
-      {error ? <div className="inline-error">{error}</div> : null}
-      <div className="card-grid">
-        {drivers.map((driver) => (
-          <article key={driver.id} className="summary-card">
-            <div className="card-head">
-              <div>
-                <h4>{driver.name}</h4>
-                <p>{driver.telegram_id}</p>
+        {error ? <div className="inline-error">{error}</div> : null}
+        <div className="card-grid">
+          {drivers.map((driver) => (
+            <article
+              key={driver.id}
+              className={`summary-card selectable-card ${selectedDriver?.id === driver.id ? 'selected' : ''}`}
+              onClick={() => void selectDriver(driver.id)}
+            >
+              <div className="card-head">
+                <div>
+                  <h4>{driver.name}</h4>
+                  <p>{driver.telegram_id}</p>
+                </div>
+                <StatusPill tone={driver.is_online ? 'approved' : 'pending'}>
+                  {driver.is_online ? 'Online' : 'Offline'}
+                </StatusPill>
               </div>
-              <StatusPill tone={driver.is_online ? 'approved' : 'pending'}>
-                {driver.is_online ? 'Online' : 'Offline'}
+              <dl className="detail-grid">
+                <DetailItem label="Active Orders" value={`${driver.active_orders}`} />
+                <DetailItem label="Delivered" value={`${driver.delivered_orders}`} />
+                <DetailItem label="Max Distance" value={`${driver.max_delivery_distance_miles} mi`} />
+                <DetailItem label="Capacity" value={`${driver.max_concurrent_orders}`} />
+                <DetailItem label="Timezone" value={driver.timezone || 'America/New_York'} />
+                <DetailItem label="Working Hours" value={driver.working_hours_summary || 'Always available'} />
+              </dl>
+              <div className="row-actions">
+                <button
+                  className="secondary-button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void toggleOnline(driver);
+                  }}
+                  type="button"
+                >
+                  Set {driver.is_online ? 'Offline' : 'Online'}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      </article>
+
+      <article className="panel detail-panel">
+        {selectedDriver ? (
+          <>
+            <div className="panel-header">
+              <div>
+                <p className="eyebrow">Working Hours</p>
+                <h3>{selectedDriver.name}</h3>
+              </div>
+              <StatusPill tone={selectedDriver.active ? 'approved' : 'cancelled'}>
+                {selectedDriver.active ? 'Active' : 'Inactive'}
               </StatusPill>
             </div>
+
             <dl className="detail-grid">
-              <DetailItem label="Active Orders" value={`${driver.active_orders}`} />
-              <DetailItem label="Delivered" value={`${driver.delivered_orders}`} />
-              <DetailItem label="Max Distance" value={`${driver.max_delivery_distance_miles} mi`} />
-              <DetailItem label="Capacity" value={`${driver.max_concurrent_orders}`} />
+              <DetailItem label="Telegram" value={`${selectedDriver.telegram_id}`} />
+              <DetailItem label="Pickup Hub" value={selectedDriver.pickup_address?.name || 'Unassigned'} />
+              <DetailItem label="Range" value={`${selectedDriver.max_delivery_distance_miles} mi`} />
+              <DetailItem label="Capacity" value={`${selectedDriver.max_concurrent_orders}`} />
             </dl>
-            <button className="secondary-button" onClick={() => void toggleOnline(driver)}>
-              Set {driver.is_online ? 'Offline' : 'Online'}
-            </button>
-          </article>
-        ))}
-      </div>
-    </article>
+
+            <form className="stack detail-block" onSubmit={saveWorkingHours}>
+              <label className="field">
+                <span>Timezone</span>
+                <input
+                  placeholder="America/New_York"
+                  value={hoursForm.timezone}
+                  onChange={(event) =>
+                    setHoursForm((current) => ({
+                      ...current,
+                      timezone: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+
+              <div className="hours-grid">
+                {hoursForm.hours.map((entry, index) => (
+                  <article key={`hours-${index}`} className="hour-row">
+                    <div className="hour-row-head">
+                      <strong>{WEEKDAY_LABELS[index]}</strong>
+                      <label className="checkbox-row">
+                        <input
+                          checked={entry.active}
+                          onChange={(event) =>
+                            setHoursForm((current) => ({
+                              ...current,
+                              hours: current.hours.map((row) =>
+                                row.day_of_week === entry.day_of_week
+                                  ? { ...row, active: event.target.checked }
+                                  : row,
+                              ),
+                            }))
+                          }
+                          type="checkbox"
+                        />
+                        <span>Active</span>
+                      </label>
+                    </div>
+                    <div className="split-fields">
+                      <label className="field">
+                        <span>Start</span>
+                        <input
+                          disabled={!entry.active}
+                          type="time"
+                          value={entry.start_local_time}
+                          onChange={(event) =>
+                            setHoursForm((current) => ({
+                              ...current,
+                              hours: current.hours.map((row) =>
+                                row.day_of_week === entry.day_of_week
+                                  ? { ...row, start_local_time: event.target.value }
+                                  : row,
+                              ),
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="field">
+                        <span>End</span>
+                        <input
+                          disabled={!entry.active}
+                          type="time"
+                          value={entry.end_local_time}
+                          onChange={(event) =>
+                            setHoursForm((current) => ({
+                              ...current,
+                              hours: current.hours.map((row) =>
+                                row.day_of_week === entry.day_of_week
+                                  ? { ...row, end_local_time: event.target.value }
+                                  : row,
+                              ),
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              <button className="primary-button" disabled={savingHours} type="submit">
+                {savingHours ? 'Saving…' : 'Save Working Hours'}
+              </button>
+            </form>
+          </>
+        ) : (
+          <EmptyPanel title="Select a driver" copy="Choose a driver to edit timezone and working hours for the dispatch queue." />
+        )}
+      </article>
+    </section>
   );
 }
 

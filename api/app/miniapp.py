@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
+import random
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -16,6 +17,13 @@ from .dispatch_rules import (
     normalize_order_status,
     normalize_payment_type,
 )
+from .dispatch_service import (
+    process_expired_dispatch_offers,
+    respond_to_dispatch_offer,
+    serialize_dispatch_offer,
+    summarize_driver_working_hours,
+)
+from .audit_service import log_audit_event
 from .inventory_service import get_inventory_service
 from .miniapp_auth import (
     build_customer_display_name,
@@ -85,6 +93,36 @@ def _serialize_pickup_arrival_photo(photo: models.PickupArrivalPhoto) -> dict:
         "customer_name": photo.customer.display_name if photo.customer else None,
         "customer_telegram_id": photo.customer.telegram_id if photo.customer else None,
         "created_at": photo.created_at.isoformat() if photo.created_at else None,
+    }
+
+
+def _serialize_support_ticket(ticket: models.SupportTicket) -> dict:
+    return {
+        "id": ticket.id,
+        "subject": ticket.subject,
+        "message": ticket.message,
+        "category": ticket.category,
+        "priority": ticket.priority,
+        "status": ticket.status,
+        "order_number": ticket.order.order_number if ticket.order else None,
+        "assigned_admin_username": ticket.assigned_admin_username,
+        "resolution_note": ticket.resolution_note,
+        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "updated_at": ticket.updated_at.isoformat() if ticket.updated_at else None,
+    }
+
+
+def _serialize_referral(referral: models.Referral) -> dict:
+    return {
+        "id": referral.id,
+        "invite_code": referral.invite.code if referral.invite else None,
+        "status": referral.status,
+        "reward_status": referral.reward_status,
+        "notes": referral.notes,
+        "referred_customer_id": referral.referred_customer_id,
+        "referred_name": referral.referred_customer.display_name if referral.referred_customer else None,
+        "created_at": referral.created_at.isoformat() if referral.created_at else None,
+        "claimed_at": referral.claimed_at.isoformat() if referral.claimed_at else None,
     }
 
 
@@ -236,6 +274,8 @@ def _ensure_driver_profile(
         driver.max_delivery_distance_miles = 15.0
     if getattr(driver, "max_concurrent_orders", None) is None:
         driver.max_concurrent_orders = 1
+    if getattr(driver, "timezone", None) is None:
+        driver.timezone = "America/New_York"
     return driver
 
 
@@ -273,6 +313,8 @@ def _serialize_driver_profile(db: Session, driver: models.Driver) -> dict:
         "accepts_pickup": getattr(driver, "accepts_pickup", True),
         "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
         "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
+        "timezone": getattr(driver, "timezone", "America/New_York"),
+        "working_hours_summary": summarize_driver_working_hours(driver),
         "active_orders": active_orders,
         "delivered_orders": delivered_orders,
         "pickup_address": {
@@ -357,6 +399,12 @@ def _claim_invite_for_customer(
     if invite.alias_username and not customer.alias_username:
         customer.alias_username = _ensure_unique_alias_username(db, invite.alias_username, customer.id)
     customer.account_status = "active"
+
+    referral = db.query(models.Referral).filter(models.Referral.invite_id == invite.id).first()
+    if referral and not referral.referred_customer_id:
+        referral.referred_customer_id = customer.id
+        referral.status = "claimed"
+        referral.claimed_at = datetime.now(timezone.utc)
     return invite
 
 
@@ -389,9 +437,15 @@ def _resolve_delivery_fee(
     delivery_or_pickup: str,
     delivery_address_id: int | None = None,
     delivery_address_text: str | None = None,
-) -> tuple[int, str, int | None, str | None]:
+) -> tuple[int, str, int | None, str | None, dict]:
     if delivery_or_pickup == "pickup":
-        return 0, "Pickup", None, None
+        return 0, "Pickup", None, None, {
+            "delivery_zone": "Pickup",
+            "distance_miles": 0,
+            "origin_name": "Pickup",
+            "resolved_address": None,
+            "geocoder_provider": None,
+        }
 
     resolved_address_id = delivery_address_id
     resolved_address_text = (delivery_address_text or "").strip() or None
@@ -411,8 +465,17 @@ def _resolve_delivery_fee(
     from .delivery_service import get_delivery_service
 
     delivery_service = get_delivery_service(db)
-    delivery_fee_cents, delivery_zone = delivery_service.calculate_delivery_fee(resolved_address_text)
-    return delivery_fee_cents, delivery_zone, resolved_address_id, resolved_address_text
+    try:
+        quote = delivery_service.calculate_delivery_quote(resolved_address_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return (
+        quote["delivery_fee_cents"],
+        quote["delivery_zone"],
+        resolved_address_id,
+        resolved_address_text,
+        quote,
+    )
 
 
 @router.post("/auth/telegram")
@@ -554,6 +617,7 @@ async def miniapp_orders(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    process_expired_dispatch_offers(db)
     if _resolve_customer_role(customer) == "driver":
         driver = _get_driver_for_customer(db, customer)
         orders = db.query(models.Order).filter(
@@ -676,7 +740,7 @@ async def miniapp_delivery_fee(
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
     _require_customer_role(customer)
-    delivery_fee_cents, delivery_zone, _, _ = _resolve_delivery_fee(
+    delivery_fee_cents, delivery_zone, _, _, delivery_quote = _resolve_delivery_fee(
         db=db,
         customer=customer,
         delivery_or_pickup=fee_request.delivery_or_pickup,
@@ -687,6 +751,10 @@ async def miniapp_delivery_fee(
         "delivery_fee_cents": delivery_fee_cents,
         "delivery_zone": delivery_zone,
         "delivery_type": fee_request.delivery_or_pickup,
+        "distance_miles": delivery_quote.get("distance_miles"),
+        "origin_name": delivery_quote.get("origin_name"),
+        "resolved_address": delivery_quote.get("resolved_address"),
+        "geocoder_provider": delivery_quote.get("geocoder_provider"),
     }
 
 
@@ -738,7 +806,7 @@ async def miniapp_create_order(
             )
         )
 
-    delivery_fee_cents, delivery_zone, delivery_address_id, delivery_address_text = _resolve_delivery_fee(
+    delivery_fee_cents, delivery_zone, delivery_address_id, delivery_address_text, delivery_quote = _resolve_delivery_fee(
         db=db,
         customer=customer,
         delivery_or_pickup=delivery_or_pickup,
@@ -760,6 +828,10 @@ async def miniapp_create_order(
     payment_metadata = {
         "source": "miniapp",
         "delivery_zone": delivery_zone,
+        "delivery_distance_miles": delivery_quote.get("distance_miles"),
+        "origin_name": delivery_quote.get("origin_name"),
+        "resolved_address": delivery_quote.get("resolved_address"),
+        "geocoder_provider": delivery_quote.get("geocoder_provider"),
     }
     if payment_type == "btc":
         settings = db.query(models.Settings).first()
@@ -951,6 +1023,176 @@ async def miniapp_upload_pickup_arrival_photo(
         "message": "Pickup arrival proof uploaded",
         "pickup_arrival_photo": _serialize_pickup_arrival_photo(arrival_photo),
         "order": _serialize_order(order),
+    }
+
+
+@router.get("/support-tickets")
+async def miniapp_support_tickets(
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    tickets = db.query(models.SupportTicket).filter(
+        models.SupportTicket.customer_id == customer.id
+    ).order_by(models.SupportTicket.created_at.desc()).all()
+    return [_serialize_support_ticket(ticket) for ticket in tickets]
+
+
+@router.post("/support-tickets")
+async def miniapp_create_support_ticket(
+    ticket_data: schemas.MiniAppSupportTicketCreate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    role = _resolve_customer_role(customer)
+    order = None
+    if ticket_data.order_number:
+        order_query = db.query(models.Order).filter(
+            models.Order.order_number == ticket_data.order_number,
+        )
+        if role == "driver":
+            driver = _get_driver_for_customer(db, customer)
+            order_query = order_query.filter(models.Order.driver_id == driver.id)
+        else:
+            order_query = order_query.filter(models.Order.customer_id == customer.id)
+        order = order_query.first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found for support request")
+
+    ticket = models.SupportTicket(
+        customer_id=customer.id,
+        order_id=order.id if order else None,
+        role=role,
+        category=(ticket_data.category or "general").strip().lower(),
+        priority=(ticket_data.priority or "normal").strip().lower(),
+        subject=ticket_data.subject.strip(),
+        message=ticket_data.message.strip(),
+        status="open",
+    )
+    db.add(ticket)
+    db.commit()
+    db.refresh(ticket)
+    log_audit_event(
+        db,
+        actor_type=role,
+        actor_customer_id=customer.id,
+        action="support_ticket_created",
+        entity_type="support_ticket",
+        entity_id=ticket.id,
+        payload={
+            "order_number": order.order_number if order else None,
+            "category": ticket.category,
+            "priority": ticket.priority,
+        },
+    )
+    db.commit()
+    return _serialize_support_ticket(ticket)
+
+
+@router.get("/referrals")
+async def miniapp_referrals(
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    _require_customer_role(customer)
+    referrals = db.query(models.Referral).filter(
+        models.Referral.referrer_customer_id == customer.id
+    ).order_by(models.Referral.created_at.desc()).all()
+    return [_serialize_referral(referral) for referral in referrals]
+
+
+@router.post("/referrals")
+async def miniapp_create_referral(
+    referral_data: schemas.MiniAppReferralCreate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    _require_customer_role(customer)
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    while True:
+        code = "".join(random.choice(alphabet) for _ in range(8))
+        if not db.query(models.CustomerInvite).filter(models.CustomerInvite.code == code).first():
+            break
+
+    invite = models.CustomerInvite(
+        code=code,
+        alias_username=referral_data.alias_username,
+        alias_email=referral_data.alias_email,
+        target_role="customer",
+        notes=referral_data.notes,
+        status="pending",
+        created_by=customer.id,
+    )
+    db.add(invite)
+    db.flush()
+
+    referral = models.Referral(
+        referrer_customer_id=customer.id,
+        invite_id=invite.id,
+        status="pending",
+        notes=referral_data.notes,
+    )
+    db.add(referral)
+    db.commit()
+    db.refresh(referral)
+    log_audit_event(
+        db,
+        actor_type="customer",
+        actor_customer_id=customer.id,
+        action="referral_created",
+        entity_type="referral",
+        entity_id=referral.id,
+        payload={"invite_code": invite.code},
+    )
+    db.commit()
+    return {
+        "message": "Referral invite created",
+        "referral": _serialize_referral(referral),
+    }
+
+
+@router.get("/driver/offers")
+async def miniapp_driver_offers(
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    driver = _get_driver_for_customer(db, customer)
+    process_expired_dispatch_offers(db)
+    offers = db.query(models.DriverAssignmentOffer).filter(
+        models.DriverAssignmentOffer.driver_id == driver.id,
+        models.DriverAssignmentOffer.status == "pending",
+    ).order_by(models.DriverAssignmentOffer.offered_at.desc()).all()
+    return [serialize_dispatch_offer(offer) for offer in offers]
+
+
+@router.post("/driver/offers/{offer_id}/respond")
+async def miniapp_respond_to_driver_offer(
+    offer_id: int,
+    response_data: schemas.DriverOfferResponse,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    driver = _get_driver_for_customer(db, customer)
+    try:
+        result = respond_to_dispatch_offer(
+            db,
+            offer_id=offer_id,
+            driver_id=driver.id,
+            action=response_data.action,
+            response_note=response_data.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "message": f"Offer {response_data.action}ed",
+        "result": {
+            "dispatch_queue": result.get("dispatch_queue"),
+            "offer": result.get("offer"),
+            "next_offer": result.get("next_offer"),
+            "assigned": result.get("assigned"),
+            "order": _serialize_order(result["order"]) if result.get("order") else None,
+        },
+        "driver_profile": _serialize_driver_profile(db, driver),
     }
 
 

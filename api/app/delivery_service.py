@@ -1,97 +1,159 @@
-# [file name]: delivery_service.py
-from sqlalchemy.orm import Session
-from geopy.geocoders import Nominatim
-from geopy.distance import geodesic
+from __future__ import annotations
+
 import logging
-from typing import Optional, Tuple
+import os
+from typing import Any
+
+import requests
+from geopy.distance import geodesic
+from geopy.geocoders import Nominatim
+from sqlalchemy.orm import Session
+
 from . import models
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CENTER = {
+    "name": "Atlantic Station",
+    "address": "Atlantic Station, Atlanta, GA",
+    "lat": 33.7901,
+    "lng": -84.3972,
+}
+
 
 class DeliveryService:
     def __init__(self, db: Session):
         self.db = db
         self.geolocator = Nominatim(user_agent="delivery_bot")
-    
-    def calculate_delivery_fee(self, address_text: str, city: str = "YourCity") -> Tuple[int, str]:
-        """
-        Calculate delivery fee based on address
-        Returns: (fee_cents, zone_name)
-        """
+        self.google_maps_api_key = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+
+    def _get_settings(self) -> models.Settings:
+        settings = self.db.query(models.Settings).first()
+        if settings:
+            return settings
+
+        settings = models.Settings(id=1)
+        self.db.add(settings)
+        self.db.commit()
+        self.db.refresh(settings)
+        return settings
+
+    def _get_origin(self, settings: models.Settings) -> dict[str, Any]:
+        return {
+            "name": settings.central_location_name or DEFAULT_CENTER["name"],
+            "address": settings.central_location_address or DEFAULT_CENTER["address"],
+            "lat": settings.central_location_lat or DEFAULT_CENTER["lat"],
+            "lng": settings.central_location_lng or DEFAULT_CENTER["lng"],
+        }
+
+    def _geocode_with_google(self, address_text: str) -> dict[str, Any] | None:
+        if not self.google_maps_api_key:
+            return None
+
         try:
-            # Get delivery zones from database
-            zones = self.db.query(models.DeliveryZone).filter(
-                models.DeliveryZone.active == True
-            ).all()
-            
-            if not zones:
-                # Fallback: if no zones configured, use simple city-based logic
-                return self._fallback_calculation(address_text, city)
-            
-            # Try to geocode the address
-            location = self.geolocator.geocode(f"{address_text}, {city}")
+            response = requests.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={
+                    "address": address_text,
+                    "key": self.google_maps_api_key,
+                },
+                timeout=10,
+            )
+            payload = response.json()
+            if response.status_code != 200 or payload.get("status") != "OK":
+                logger.warning("Google geocoding failed for %s: %s", address_text, payload.get("status"))
+                return None
+
+            result = payload["results"][0]
+            location = result["geometry"]["location"]
+            return {
+                "provider": "google_maps",
+                "lat": location["lat"],
+                "lng": location["lng"],
+                "formatted_address": result.get("formatted_address") or address_text,
+            }
+        except Exception as exc:
+            logger.warning("Google geocoding request failed for %s: %s", address_text, exc)
+            return None
+
+    def _geocode_with_nominatim(self, address_text: str) -> dict[str, Any] | None:
+        try:
+            location = self.geolocator.geocode(address_text)
             if not location:
-                logger.warning(f"Could not geocode address: {address_text}")
-                return self._fallback_calculation(address_text, city)
-            
-            customer_coords = (location.latitude, location.longitude)
-            
-            # Check if address is within any delivery zone
-            for zone in zones:
-                if self._is_in_delivery_zone(customer_coords, zone):
-                    return zone.base_fee_cents, zone.name
-            
-            # If not in any zone, charge outside city fee
-            return zones[0].outside_city_fee_cents, "Outside City"
-            
-        except Exception as e:
-            logger.error(f"Error calculating delivery fee: {e}")
-            # Fallback to base fee
-            return 1000, "Standard"
-    
-    def _is_in_delivery_zone(self, coords: Tuple[float, float], zone: models.DeliveryZone) -> bool:
-        """Check if coordinates are within delivery zone polygon"""
-        # Simple implementation - you might want to use a proper geo library
-        # This is a simplified version - in production, use shapely or similar
-        if not zone.polygon_coords:
-            # If no polygon defined, assume entire city
-            return True
-            
-        # Basic point-in-polygon check (simplified)
-        # For production, implement proper point-in-polygon algorithm
-        try:
-            polygon = zone.polygon_coords.get('coordinates', [])[0]
-            return self._point_in_polygon(coords[0], coords[1], polygon)
-        except:
-            return True  # Fallback to True if polygon check fails
-    
-    def _point_in_polygon(self, x: float, y: float, poly: list) -> bool:
-        """Ray casting algorithm for point in polygon"""
-        n = len(poly)
-        inside = False
-        p1x, p1y = poly[0]
-        for i in range(n + 1):
-            p2x, p2y = poly[i % n]
-            if y > min(p1y, p2y):
-                if y <= max(p1y, p2y):
-                    if x <= max(p1x, p2x):
-                        if p1y != p2y:
-                            xints = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                        if p1x == p2x or x <= xints:
-                            inside = not inside
-            p1x, p1y = p2x, p2y
-        return inside
-    
-    def _fallback_calculation(self, address_text: str, city: str) -> Tuple[int, str]:
-        """Fallback delivery fee calculation based on text analysis"""
-        address_lower = address_text.lower()
-        city_lower = city.lower()
-        
-        # Check if address contains city name (simple heuristic)
-        if city_lower in address_lower:
-            return 1000, "Within City"
+                return None
+            return {
+                "provider": "nominatim",
+                "lat": location.latitude,
+                "lng": location.longitude,
+                "formatted_address": getattr(location, "address", None) or address_text,
+            }
+        except Exception as exc:
+            logger.warning("Nominatim geocoding failed for %s: %s", address_text, exc)
+            return None
+
+    def geocode_address(self, address_text: str) -> dict[str, Any]:
+        if not address_text or not address_text.strip():
+            raise ValueError("Delivery address is required")
+
+        normalized_address = address_text.strip()
+        geocoded = self._geocode_with_google(normalized_address) or self._geocode_with_nominatim(normalized_address)
+        if not geocoded:
+            raise ValueError("Unable to validate the delivery address")
+        return geocoded
+
+    def calculate_delivery_quote(self, address_text: str) -> dict[str, Any]:
+        settings = self._get_settings()
+        origin = self._get_origin(settings)
+        geocoded = self.geocode_address(address_text)
+        destination = (geocoded["lat"], geocoded["lng"])
+        origin_coords = (origin["lat"], origin["lng"])
+        distance_miles = float(geodesic(origin_coords, destination).miles)
+
+        atlantic_station_radius = max(float(settings.atlantic_station_radius_miles or 0), 0)
+        inside_i285_radius = max(float(settings.inside_i285_radius_miles or 0), atlantic_station_radius)
+        outside_i285_radius = max(float(settings.outside_i285_radius_miles or 0), inside_i285_radius)
+        max_delivery_radius = max(float(settings.max_delivery_radius_miles or 0), outside_i285_radius)
+
+        if distance_miles <= atlantic_station_radius:
+            zone_name = "Atlantic Station"
+            fee_cents = int(settings.atlantic_station_fee_cents or 0)
+        elif distance_miles <= inside_i285_radius:
+            zone_name = "Inside I-285"
+            fee_cents = int(settings.inside_i285_fee_cents or 0)
+        elif distance_miles <= outside_i285_radius:
+            zone_name = "Outside I-285"
+            fee_cents = int(settings.outside_i285_fee_cents or 0)
+        elif not getattr(settings, "delivery_radius_enforced", True):
+            zone_name = "Outside I-285"
+            fee_cents = int(settings.outside_i285_fee_cents or 0)
         else:
-            return 1000, "Outside City"
+            raise ValueError(
+                f"Delivery address is outside the service radius ({distance_miles:.1f} miles from {origin['name']})"
+            )
+
+        if getattr(settings, "delivery_radius_enforced", True) and distance_miles > max_delivery_radius:
+            raise ValueError(
+                f"Delivery address is outside the maximum service radius ({max_delivery_radius:.1f} miles)"
+            )
+
+        return {
+            "delivery_fee_cents": fee_cents,
+            "delivery_zone": zone_name,
+            "distance_miles": round(distance_miles, 2),
+            "origin_name": origin["name"],
+            "origin_address": origin["address"],
+            "resolved_address": geocoded["formatted_address"],
+            "geocoder_provider": geocoded["provider"],
+            "max_delivery_radius_miles": max_delivery_radius,
+            "atlantic_station_radius_miles": atlantic_station_radius,
+            "inside_i285_radius_miles": inside_i285_radius,
+            "outside_i285_radius_miles": outside_i285_radius,
+        }
+
+    def calculate_delivery_fee(self, address_text: str) -> tuple[int, str]:
+        quote = self.calculate_delivery_quote(address_text)
+        return quote["delivery_fee_cents"], quote["delivery_zone"]
+
 
 def get_delivery_service(db: Session) -> DeliveryService:
     return DeliveryService(db)

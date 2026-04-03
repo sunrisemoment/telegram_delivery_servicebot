@@ -76,6 +76,7 @@ class Driver(Base):
     accepts_pickup = Column(Boolean, default=True)
     max_delivery_distance_miles = Column(Float, default=15.0)
     max_concurrent_orders = Column(Integer, default=1)
+    timezone = Column(String(64), default="America/New_York")
     pickup_address_id = Column(BigInteger, ForeignKey("pickup_addresses.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -188,6 +189,20 @@ class MiniAppSession(Base):
 
     customer = relationship("Customer", foreign_keys=[customer_id])
 
+
+class AdminSession(Base):
+    __tablename__ = "admin_sessions"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    username = Column(String(100), nullable=False)
+    session_token = Column(String(128), unique=True, nullable=False, index=True)
+    ip_address = Column(String(64))
+    user_agent = Column(Text)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    revoked_at = Column(DateTime(timezone=True))
+    last_seen_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
 class DriverStock(Base):
     __tablename__ = "driver_stock"
     
@@ -236,6 +251,64 @@ class InventoryReservation(Base):
     order = relationship("Order", foreign_keys=[order_id])
     menu_item = relationship("MenuItem", foreign_keys=[menu_item_id])
 
+
+class DriverWorkingHours(Base):
+    __tablename__ = "driver_working_hours"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    driver_id = Column(BigInteger, ForeignKey("drivers.id"), nullable=False)
+    day_of_week = Column(Integer, nullable=False)
+    start_local_time = Column(String(5), nullable=False)
+    end_local_time = Column(String(5), nullable=False)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("driver_id", "day_of_week", name="uq_driver_working_hours_driver_day"),
+    )
+
+    driver = relationship("Driver", foreign_keys=[driver_id], backref="working_hours")
+
+
+class DispatchQueueEntry(Base):
+    __tablename__ = "dispatch_queue_entries"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    order_id = Column(BigInteger, ForeignKey("orders.id"), nullable=False, unique=True)
+    status = Column(String(20), default="queued")
+    started_by_username = Column(String(100))
+    current_offer_id = Column(BigInteger, ForeignKey("driver_assignment_offers.id"))
+    last_offered_driver_id = Column(BigInteger, ForeignKey("drivers.id"))
+    last_processed_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    order = relationship("Order", foreign_keys=[order_id], backref="dispatch_queue")
+    current_offer = relationship("DriverAssignmentOffer", foreign_keys=[current_offer_id], post_update=True)
+    last_offered_driver = relationship("Driver", foreign_keys=[last_offered_driver_id])
+
+
+class DriverAssignmentOffer(Base):
+    __tablename__ = "driver_assignment_offers"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    order_id = Column(BigInteger, ForeignKey("orders.id"), nullable=False)
+    queue_entry_id = Column(BigInteger, ForeignKey("dispatch_queue_entries.id"), nullable=False)
+    driver_id = Column(BigInteger, ForeignKey("drivers.id"), nullable=False)
+    sequence_number = Column(Integer, nullable=False, default=1)
+    status = Column(String(20), default="pending")
+    created_by_username = Column(String(100))
+    response_note = Column(Text)
+    offered_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    responded_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    order = relationship("Order", foreign_keys=[order_id], backref="driver_assignment_offers")
+    queue_entry = relationship("DispatchQueueEntry", foreign_keys=[queue_entry_id], backref="offers")
+    driver = relationship("Driver", foreign_keys=[driver_id], backref="assignment_offers")
+
 class DeliveryZone(Base):
     __tablename__ = "delivery_zones"
     
@@ -258,6 +331,62 @@ class PickupAddress(Base):
     active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class SupportTicket(Base):
+    __tablename__ = "support_tickets"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    order_id = Column(BigInteger, ForeignKey("orders.id"))
+    role = Column(String(20), default="customer")
+    category = Column(String(50), default="general")
+    priority = Column(String(20), default="normal")
+    subject = Column(String(200), nullable=False)
+    message = Column(Text, nullable=False)
+    status = Column(String(20), default="open")
+    assigned_admin_username = Column(String(100))
+    resolution_note = Column(Text)
+    resolved_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    customer = relationship("Customer", foreign_keys=[customer_id], backref="support_tickets")
+    order = relationship("Order", foreign_keys=[order_id], backref="support_tickets")
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    referrer_customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    referred_customer_id = Column(BigInteger, ForeignKey("customers.id"))
+    invite_id = Column(BigInteger, ForeignKey("customer_invites.id"), nullable=False, unique=True)
+    status = Column(String(20), default="pending")
+    reward_status = Column(String(20), default="pending")
+    notes = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    claimed_at = Column(DateTime(timezone=True))
+
+    referrer_customer = relationship("Customer", foreign_keys=[referrer_customer_id], backref="referrals_sent")
+    referred_customer = relationship("Customer", foreign_keys=[referred_customer_id], backref="referrals_received")
+    invite = relationship("CustomerInvite", foreign_keys=[invite_id], backref="referral")
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    actor_type = Column(String(20), nullable=False)
+    actor_username = Column(String(100))
+    actor_customer_id = Column(BigInteger, ForeignKey("customers.id"))
+    action = Column(String(100), nullable=False)
+    entity_type = Column(String(100))
+    entity_id = Column(String(100))
+    payload = Column(JSON)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    actor_customer = relationship("Customer", foreign_keys=[actor_customer_id])
 
 class ContactSettings(Base):
     __tablename__ = "contact_settings"
@@ -285,6 +414,21 @@ class Settings(Base):
     
     id = Column(BigInteger, primary_key=True, index=True)
     btc_discount_percent = Column(Integer, default=0)  # Percentage discount for BTC payments
+    central_location_name = Column(String(120), default="Atlantic Station")
+    central_location_address = Column(String(255), default="Atlantic Station, Atlanta, GA")
+    central_location_lat = Column(Float, default=33.7901)
+    central_location_lng = Column(Float, default=-84.3972)
+    atlantic_station_radius_miles = Column(Float, default=2.0)
+    atlantic_station_fee_cents = Column(Integer, default=500)
+    inside_i285_radius_miles = Column(Float, default=10.0)
+    inside_i285_fee_cents = Column(Integer, default=1000)
+    outside_i285_radius_miles = Column(Float, default=18.0)
+    outside_i285_fee_cents = Column(Integer, default=2000)
+    max_delivery_radius_miles = Column(Float, default=18.0)
+    delivery_radius_enforced = Column(Boolean, default=True)
+    dispatch_offer_timeout_seconds = Column(Integer, default=90)
+    dispatch_auto_escalate = Column(Boolean, default=True)
+    admin_session_hours = Column(Integer, default=12)
     updated_by = Column(BigInteger, ForeignKey("customers.id"))
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

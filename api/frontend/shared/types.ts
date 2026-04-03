@@ -8,6 +8,13 @@ export interface DashboardStats {
   completed_orders: number;
 }
 
+export interface AdminSessionSummary {
+  session_token: string;
+  username: string;
+  expires_at: string;
+  requires_totp?: boolean;
+}
+
 export interface InviteSummary {
   id: number;
   code: string;
@@ -33,6 +40,8 @@ export interface DriverSummary {
   accepts_pickup: boolean;
   max_delivery_distance_miles: number;
   max_concurrent_orders: number;
+  timezone?: string | null;
+  working_hours_summary?: string | null;
   delivered_orders: number;
   active_orders: number;
   pickup_address?: {
@@ -41,6 +50,47 @@ export interface DriverSummary {
     address: string;
   } | null;
   created_at?: string | null;
+}
+
+export interface DriverWorkingHourSummary {
+  id?: number;
+  day_of_week: number;
+  start_local_time: string;
+  end_local_time: string;
+  active: boolean;
+}
+
+export interface DriverWorkingHoursResponse {
+  driver_id: number;
+  timezone: string;
+  hours: DriverWorkingHourSummary[];
+}
+
+export interface DispatchOfferSummary {
+  id: number;
+  order_number?: string | null;
+  delivery_or_pickup?: string | null;
+  destination?: string | null;
+  total_cents?: number | null;
+  driver_id: number;
+  driver_name?: string | null;
+  status: string;
+  sequence_number: number;
+  response_note?: string | null;
+  offered_at?: string | null;
+  expires_at?: string | null;
+  responded_at?: string | null;
+}
+
+export interface DispatchQueueSummary {
+  id: number;
+  status: string;
+  started_by_username?: string | null;
+  current_offer_id?: number | null;
+  last_offered_driver_id?: number | null;
+  last_processed_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
 export interface CustomerSummary {
@@ -135,6 +185,8 @@ export interface OrderDetail {
   pickup_eta_updates?: PickupEtaUpdateSummary[];
   latest_pickup_arrival_photo?: PickupArrivalPhotoSummary | null;
   pickup_arrival_photos?: PickupArrivalPhotoSummary[];
+  dispatch_queue?: DispatchQueueSummary | null;
+  dispatch_offers?: DispatchOfferSummary[];
 }
 
 export interface PickupAddressSummary {
@@ -189,6 +241,25 @@ export interface ContactSettingsSummary {
 
 export interface BtcDiscountSettings {
   btc_discount_percent: number;
+  updated_at?: string | null;
+}
+
+export interface DeliveryConfigSettings {
+  central_location_name: string;
+  central_location_address: string;
+  central_location_lat: number;
+  central_location_lng: number;
+  atlantic_station_radius_miles: number;
+  atlantic_station_fee_cents: number;
+  inside_i285_radius_miles: number;
+  inside_i285_fee_cents: number;
+  outside_i285_radius_miles: number;
+  outside_i285_fee_cents: number;
+  max_delivery_radius_miles: number;
+  delivery_radius_enforced: boolean;
+  dispatch_offer_timeout_seconds: number;
+  dispatch_auto_escalate: boolean;
+  admin_session_hours: number;
   updated_at?: string | null;
 }
 
@@ -273,6 +344,8 @@ export interface MiniAppDriverProfile {
   accepts_pickup: boolean;
   max_delivery_distance_miles: number;
   max_concurrent_orders: number;
+  timezone?: string | null;
+  working_hours_summary?: string | null;
   active_orders: number;
   delivered_orders: number;
   pickup_address?: {
@@ -282,6 +355,8 @@ export interface MiniAppDriverProfile {
   } | null;
   created_at?: string | null;
 }
+
+export interface MiniAppDriverOffer extends DispatchOfferSummary {}
 
 export interface MiniAppConfig {
   customer: MiniAppCustomer;
@@ -347,4 +422,49 @@ export interface MiniAppOrder {
   payment_metadata?: Record<string, unknown>;
   latest_pickup_eta?: PickupEtaUpdateSummary | null;
   latest_pickup_arrival_photo?: PickupArrivalPhotoSummary | null;
+}
+
+export interface SupportTicketSummary {
+  id: number;
+  customer_id?: number | null;
+  customer_name?: string | null;
+  customer_telegram_id?: number | null;
+  order_number?: string | null;
+  role?: string | null;
+  category: string;
+  priority: string;
+  subject: string;
+  message: string;
+  status: string;
+  assigned_admin_username?: string | null;
+  resolution_note?: string | null;
+  resolved_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ReferralSummary {
+  id: number;
+  invite_code?: string | null;
+  referrer_customer_id?: number | null;
+  referrer_name?: string | null;
+  referred_customer_id?: number | null;
+  referred_name?: string | null;
+  status: string;
+  reward_status: string;
+  notes?: string | null;
+  created_at?: string | null;
+  claimed_at?: string | null;
+}
+
+export interface AuditLogSummary {
+  id: number;
+  actor_type: string;
+  actor_username?: string | null;
+  actor_customer_id?: number | null;
+  action: string;
+  entity_type?: string | null;
+  entity_id?: string | null;
+  payload?: Record<string, unknown> | null;
+  created_at?: string | null;
 }

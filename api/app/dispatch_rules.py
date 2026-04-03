@@ -1,3 +1,6 @@
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
+
 from sqlalchemy.orm import Session
 
 from . import models
@@ -73,6 +76,68 @@ def ensure_order_ready_for_dispatch(order: models.Order):
         raise ValueError("Order payment must be approved before dispatch")
 
 
+def _get_order_delivery_distance_miles(order: models.Order) -> float | None:
+    metadata = getattr(order, "payment_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+
+    distance = metadata.get("delivery_distance_miles")
+    try:
+        parsed_distance = float(distance)
+    except (TypeError, ValueError):
+        return None
+
+    return parsed_distance if parsed_distance >= 0 else None
+
+
+def _parse_local_time(value: str | None) -> time | None:
+    if not value:
+        return None
+    try:
+        hour, minute = value.split(":", 1)
+        return time(hour=int(hour), minute=int(minute))
+    except (TypeError, ValueError):
+        return None
+
+
+def driver_is_within_working_hours(
+    driver: models.Driver,
+    reference_time: datetime | None = None,
+) -> tuple[bool, str | None]:
+    working_hours = list(getattr(driver, "working_hours", []) or [])
+    if not working_hours:
+        return True, None
+
+    tz_name = getattr(driver, "timezone", None) or "America/New_York"
+    try:
+        driver_zone = ZoneInfo(tz_name)
+    except Exception:
+        driver_zone = ZoneInfo("America/New_York")
+        tz_name = "America/New_York"
+
+    now_utc = reference_time or datetime.now(timezone.utc)
+    local_now = now_utc.astimezone(driver_zone)
+    day_of_week = local_now.weekday()
+
+    todays_windows = [
+        hours for hours in working_hours
+        if getattr(hours, "active", True) and hours.day_of_week == day_of_week
+    ]
+    if not todays_windows:
+        return False, f"Driver is outside configured working hours ({tz_name})"
+
+    now_local_time = local_now.time().replace(second=0, microsecond=0)
+    for hours in todays_windows:
+        start_time = _parse_local_time(hours.start_local_time)
+        end_time = _parse_local_time(hours.end_local_time)
+        if not start_time or not end_time:
+            continue
+        if start_time <= now_local_time <= end_time:
+            return True, None
+
+    return False, f"Driver is outside configured working hours ({tz_name})"
+
+
 def driver_can_accept_order(
     db: Session,
     driver: models.Driver,
@@ -84,11 +149,28 @@ def driver_can_accept_order(
     if not getattr(driver, "is_online", True):
         return False, "Driver is offline"
 
+    within_hours, hours_reason = driver_is_within_working_hours(driver)
+    if not within_hours:
+        return False, hours_reason
+
     if order.delivery_or_pickup == "delivery" and not getattr(driver, "accepts_delivery", True):
         return False, "Driver does not accept delivery orders"
 
     if order.delivery_or_pickup == "pickup" and not getattr(driver, "accepts_pickup", True):
         return False, "Driver does not accept pickup orders"
+
+    if order.delivery_or_pickup == "delivery":
+        delivery_distance_miles = _get_order_delivery_distance_miles(order)
+        max_delivery_distance = float(getattr(driver, "max_delivery_distance_miles", 0) or 0)
+        if (
+            delivery_distance_miles is not None
+            and max_delivery_distance > 0
+            and delivery_distance_miles > max_delivery_distance
+        ):
+            return (
+                False,
+                f"Driver max distance is {max_delivery_distance:.1f} miles for a {delivery_distance_miles:.1f}-mile delivery",
+            )
 
     active_order_count = get_driver_active_order_count(
         db,

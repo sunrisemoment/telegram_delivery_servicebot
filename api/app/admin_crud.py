@@ -10,6 +10,7 @@ from .dispatch_rules import (
     ensure_order_ready_for_dispatch,
     normalize_order_status,
 )
+from .dispatch_service import summarize_driver_working_hours
 
 
 CONFIRMED_PAYMENT_STATUSES = ['paid_0conf', 'paid_confirmed', 'paid']
@@ -181,6 +182,8 @@ def get_all_drivers(db: Session, skip: int = 0, limit: int = 100):
             "accepts_pickup": getattr(driver, "accepts_pickup", True),
             "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
             "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
+            "timezone": getattr(driver, "timezone", "America/New_York"),
+            "working_hours_summary": summarize_driver_working_hours(driver),
             "delivered_orders": delivered_orders,
             "active_orders": active_orders,
             "pickup_address": pickup_address,

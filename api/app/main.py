@@ -201,9 +201,35 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
                 raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
 
         order_data['payment_type'] = _validate_payment_type(order_data['payment_type'])
-        
-        # Use pre-calculated delivery fee from client
-        delivery_fee_cents = order_data.get('delivery_fee_cents', 0)
+        delivery_type = (order_data.get('delivery_or_pickup') or 'delivery').strip().lower()
+        delivery_fee_cents = 0
+        delivery_quote = {
+            'delivery_zone': 'Pickup',
+            'distance_miles': 0,
+            'origin_name': 'Pickup',
+            'resolved_address': None,
+            'geocoder_provider': None,
+        }
+        if delivery_type == 'delivery':
+            delivery_address_text = order_data.get('delivery_address_text')
+            delivery_address_id = order_data.get('delivery_address_id')
+            if not delivery_address_text and delivery_address_id:
+                address = db.query(models.CustomerAddress).filter(
+                    models.CustomerAddress.id == delivery_address_id
+                ).first()
+                if address:
+                    delivery_address_text = address.address_text
+
+            if not delivery_address_text:
+                raise HTTPException(status_code=400, detail="Delivery address required for delivery orders")
+
+            from .delivery_service import get_delivery_service
+
+            delivery_service = get_delivery_service(db)
+            delivery_quote = delivery_service.calculate_delivery_quote(delivery_address_text)
+            delivery_fee_cents = delivery_quote['delivery_fee_cents']
+            order_data['delivery_address_text'] = delivery_quote.get('resolved_address') or delivery_address_text
+
         total_cents = order_data['total_cents']
         logger.info(f"delivery fee sents: {delivery_fee_cents}")
         # Apply BTC discount if applicable
@@ -260,13 +286,19 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
             db.refresh(customer)
 
         # Prepare payment metadata
-        payment_metadata = {}
+        payment_metadata = {
+            'delivery_zone': delivery_quote.get('delivery_zone'),
+            'delivery_distance_miles': delivery_quote.get('distance_miles'),
+            'origin_name': delivery_quote.get('origin_name'),
+            'resolved_address': delivery_quote.get('resolved_address'),
+            'geocoder_provider': delivery_quote.get('geocoder_provider'),
+        }
         if order_data.get('payment_type') == 'btc':
-            payment_metadata = {
+            payment_metadata.update({
                 'original_total_cents': order_data.get('original_total_cents'),
                 'btc_discount_percent': order_data.get('btc_discount_percent'),
                 'btc_discount_amount_cents': order_data.get('btc_discount_amount_cents')
-            }
+            })
 
         # Create order using CRUD function
         order_create = schemas.OrderCreate(
@@ -659,7 +691,9 @@ async def calculate_delivery_fee(order_data: dict, db: Session = Depends(get_db)
             if delivery_address_text:
                 from .delivery_service import get_delivery_service
                 delivery_service = get_delivery_service(db)
-                delivery_fee_cents, delivery_zone = delivery_service.calculate_delivery_fee(delivery_address_text)
+                delivery_quote = delivery_service.calculate_delivery_quote(delivery_address_text)
+                delivery_fee_cents = delivery_quote['delivery_fee_cents']
+                delivery_zone = delivery_quote['delivery_zone']
                 logger.info(f"Delivery fee calculated: ${delivery_fee_cents/100} for zone: {delivery_zone}")
             else:
                 raise HTTPException(status_code=400, detail="Delivery address required for fee calculation")
@@ -667,7 +701,11 @@ async def calculate_delivery_fee(order_data: dict, db: Session = Depends(get_db)
         return {
             "delivery_fee_cents": delivery_fee_cents,
             "delivery_zone": delivery_zone,
-            "delivery_type": delivery_type
+            "delivery_type": delivery_type,
+            "distance_miles": delivery_quote.get('distance_miles') if delivery_type == 'delivery' else 0,
+            "origin_name": delivery_quote.get('origin_name') if delivery_type == 'delivery' else 'Pickup',
+            "resolved_address": delivery_quote.get('resolved_address') if delivery_type == 'delivery' else None,
+            "geocoder_provider": delivery_quote.get('geocoder_provider') if delivery_type == 'delivery' else None,
         }
         
     except Exception as e:

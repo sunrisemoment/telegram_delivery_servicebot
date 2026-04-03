@@ -268,7 +268,9 @@ button {
 .order-card,
 .address-card,
 .cart-line,
-.summary-box {
+.summary-box,
+.offer-card,
+.ticket-card {
   border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.66);
   border: 1px solid rgba(30, 25, 18, 0.08);
@@ -360,7 +362,9 @@ textarea {
 .menu-item-card,
 .order-card,
 .address-card,
-.cart-line {
+.cart-line,
+.offer-card,
+.ticket-card {
   padding: 16px;
 }
 
@@ -519,6 +523,24 @@ textarea {
   text-decoration: underline;
 }
 
+.offer-stack,
+.ticket-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.offer-card,
+.ticket-card {
+  display: grid;
+  gap: 12px;
+}
+
+.support-form-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .toast {
   position: fixed;
   left: 50%;
@@ -589,7 +611,8 @@ textarea {
   .tabbar,
   .detail-grid,
   .toggle-row,
-  .driver-toggle-grid {
+  .driver-toggle-grid,
+  .support-form-grid {
     grid-template-columns: 1fr;
   }
 

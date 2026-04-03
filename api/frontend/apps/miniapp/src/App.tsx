@@ -8,10 +8,13 @@ import type {
   MenuItem,
   MiniAppConfig,
   MiniAppCustomer,
+  MiniAppDriverOffer,
   MiniAppDriverProfile,
   MiniAppOrder,
   MiniAppRole,
   PickupLocation,
+  ReferralSummary,
+  SupportTicketSummary,
 } from '@shared/types';
 
 const MINIAPP_API_BASE = import.meta.env.VITE_MINIAPP_API_BASE ?? '/miniapp-api';
@@ -248,7 +251,13 @@ function App() {
   const [orders, setOrders] = useState<MiniAppOrder[]>([]);
   const [addresses, setAddresses] = useState<CustomerAddress[]>([]);
   const [pickupLocations, setPickupLocations] = useState<PickupLocation[]>([]);
+  const [supportTickets, setSupportTickets] = useState<SupportTicketSummary[]>([]);
+  const [referrals, setReferrals] = useState<ReferralSummary[]>([]);
+  const [driverOffers, setDriverOffers] = useState<MiniAppDriverOffer[]>([]);
   const [cart, setCart] = useState<CartItem[]>(getStoredCart);
+  const [submittingSupportTicket, setSubmittingSupportTicket] = useState(false);
+  const [creatingReferral, setCreatingReferral] = useState(false);
+  const [offerActionId, setOfferActionId] = useState<number | null>(null);
 
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>('delivery');
   const [deliveryAddressId, setDeliveryAddressId] = useState('');
@@ -287,6 +296,9 @@ function App() {
     setOrders([]);
     setAddresses([]);
     setPickupLocations([]);
+    setSupportTickets([]);
+    setReferrals([]);
+    setDriverOffers([]);
     setDeliveryFeeCents(0);
     setDeliveryZone('Awaiting address');
     setActiveView('home');
@@ -304,29 +316,40 @@ function App() {
     try {
       const configResponse = await miniappRequest<MiniAppConfig>(token, '/config');
       const nextRole: MiniAppRole = configResponse.app_role || configResponse.customer.app_role || 'customer';
-      const requests: Array<Promise<unknown>> = [
-        miniappRequest<MiniAppOrder[]>(token, '/orders'),
-      ];
-      if (nextRole === 'customer') {
-        requests.push(
-          miniappRequest<MenuItem[]>(token, '/menu'),
-          miniappRequest<CustomerAddress[]>(token, '/addresses'),
-          miniappRequest<PickupLocation[]>(token, '/pickup-addresses'),
-        );
-      }
-
-      const [ordersResponse, menuResponse, addressesResponse, pickupResponse] = await Promise.all(requests);
+      const [ordersResponse, menuResponse, addressesResponse, pickupResponse, supportResponse, referralsResponse, offersResponse] =
+        await Promise.all([
+          miniappRequest<MiniAppOrder[]>(token, '/orders'),
+          nextRole === 'customer' ? miniappRequest<MenuItem[]>(token, '/menu') : Promise.resolve<MenuItem[]>([]),
+          nextRole === 'customer'
+            ? miniappRequest<CustomerAddress[]>(token, '/addresses')
+            : Promise.resolve<CustomerAddress[]>([]),
+          nextRole === 'customer'
+            ? miniappRequest<PickupLocation[]>(token, '/pickup-addresses')
+            : Promise.resolve<PickupLocation[]>([]),
+          miniappRequest<SupportTicketSummary[]>(token, '/support-tickets'),
+          nextRole === 'customer'
+            ? miniappRequest<ReferralSummary[]>(token, '/referrals')
+            : Promise.resolve<ReferralSummary[]>([]),
+          nextRole === 'driver'
+            ? miniappRequest<MiniAppDriverOffer[]>(token, '/driver/offers')
+            : Promise.resolve<MiniAppDriverOffer[]>([]),
+        ]);
       setConfig(configResponse);
       setCustomer(configResponse.customer);
       setOrders(Array.isArray(ordersResponse) ? ordersResponse : []);
+      setSupportTickets(Array.isArray(supportResponse) ? supportResponse : []);
       if (nextRole === 'customer') {
         setMenu(Array.isArray(menuResponse) ? menuResponse : []);
         setAddresses(Array.isArray(addressesResponse) ? addressesResponse : []);
         setPickupLocations(Array.isArray(pickupResponse) ? pickupResponse : []);
+        setReferrals(Array.isArray(referralsResponse) ? referralsResponse : []);
+        setDriverOffers([]);
       } else {
         setMenu([]);
         setAddresses([]);
         setPickupLocations([]);
+        setReferrals([]);
+        setDriverOffers(Array.isArray(offersResponse) ? offersResponse : []);
         setCart([]);
         setDeliveryFeeCents(0);
         setDeliveryZone('Driver mode');
@@ -429,6 +452,155 @@ function App() {
     }
   }
 
+  async function refreshSupportTickets(token = sessionToken) {
+    if (!token) {
+      return;
+    }
+    try {
+      const supportResponse = await miniappRequest<SupportTicketSummary[]>(token, '/support-tickets');
+      setSupportTickets(Array.isArray(supportResponse) ? supportResponse : []);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+    }
+  }
+
+  async function refreshReferrals(token = sessionToken) {
+    if (!token || isDriverApp) {
+      return;
+    }
+    try {
+      const referralsResponse = await miniappRequest<ReferralSummary[]>(token, '/referrals');
+      setReferrals(Array.isArray(referralsResponse) ? referralsResponse : []);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+    }
+  }
+
+  async function refreshDriverOffers(token = sessionToken) {
+    if (!token || !isDriverApp) {
+      return;
+    }
+    try {
+      const offersResponse = await miniappRequest<MiniAppDriverOffer[]>(token, '/driver/offers');
+      setDriverOffers(Array.isArray(offersResponse) ? offersResponse : []);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+    }
+  }
+
+  async function createSupportTicket(
+    subject: string,
+    message: string,
+    category: string,
+    priority: string,
+    orderNumber?: string,
+  ): Promise<boolean> {
+    if (!sessionToken) {
+      return false;
+    }
+
+    setSubmittingSupportTicket(true);
+    try {
+      await miniappRequest<SupportTicketSummary>(sessionToken, '/support-tickets', {
+        method: 'POST',
+        body: JSON.stringify({
+          subject,
+          message,
+          category,
+          priority,
+          order_number: orderNumber || null,
+        }),
+      });
+      await refreshSupportTickets(sessionToken);
+      pushToast('Support ticket submitted');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+      return true;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return false;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+      return false;
+    } finally {
+      setSubmittingSupportTicket(false);
+    }
+  }
+
+  async function createReferralInvite(aliasUsername?: string, aliasEmail?: string, notes?: string): Promise<boolean> {
+    if (!sessionToken || isDriverApp) {
+      return false;
+    }
+
+    setCreatingReferral(true);
+    try {
+      await miniappRequest<{ message: string; referral: ReferralSummary }>(sessionToken, '/referrals', {
+        method: 'POST',
+        body: JSON.stringify({
+          alias_username: aliasUsername || null,
+          alias_email: aliasEmail || null,
+          notes: notes || null,
+        }),
+      });
+      await refreshReferrals(sessionToken);
+      pushToast('Referral invite created');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+      return true;
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return false;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+      return false;
+    } finally {
+      setCreatingReferral(false);
+    }
+  }
+
+  async function respondToDriverOffer(offerId: number, action: 'accept' | 'decline') {
+    if (!sessionToken || !isDriverApp) {
+      return;
+    }
+
+    setOfferActionId(offerId);
+    try {
+      await miniappRequest(sessionToken, `/driver/offers/${offerId}/respond`, {
+        method: 'POST',
+        body: JSON.stringify({ action }),
+      });
+      await Promise.all([refreshOrders(sessionToken), refreshDriverOffers(sessionToken), refreshConfig(sessionToken)]);
+      if (action === 'accept') {
+        setActiveView('orders');
+      }
+      pushToast(`Offer ${action}ed`);
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setOfferActionId(null);
+    }
+  }
+
   async function updateDriverProfile(patch: Partial<Pick<MiniAppDriverProfile, 'is_online' | 'accepts_delivery' | 'accepts_pickup'>>) {
     if (!sessionToken || !isDriverApp) {
       return;
@@ -440,7 +612,7 @@ function App() {
         method: 'PUT',
         body: JSON.stringify(patch),
       });
-      await refreshConfig(sessionToken);
+      await Promise.all([refreshConfig(sessionToken), refreshDriverOffers(sessionToken)]);
       pushToast('Driver profile updated');
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
@@ -997,9 +1169,22 @@ function App() {
                 customer={customer}
                 config={config}
                 driverProfile={driverProfile}
+                orders={orders}
+                supportTickets={supportTickets}
+                referrals={referrals}
+                driverOffers={driverOffers}
                 pendingApprovalCount={pendingApprovalCount}
                 orderCount={orders.length}
                 supportText={supportText}
+                submittingSupportTicket={submittingSupportTicket}
+                creatingReferral={creatingReferral}
+                offerActionId={offerActionId}
+                onRefreshSupportTickets={() => void refreshSupportTickets()}
+                onRefreshReferrals={() => void refreshReferrals()}
+                onRefreshDriverOffers={() => void refreshDriverOffers()}
+                onCreateSupportTicket={createSupportTicket}
+                onCreateReferral={createReferralInvite}
+                onRespondToOffer={respondToDriverOffer}
               />
             ) : null}
 
@@ -1157,17 +1342,49 @@ function HomeView({
   customer,
   config,
   driverProfile,
+  orders,
+  supportTickets,
+  referrals,
+  driverOffers,
   pendingApprovalCount,
   orderCount,
   supportText,
+  submittingSupportTicket,
+  creatingReferral,
+  offerActionId,
+  onRefreshSupportTickets,
+  onRefreshReferrals,
+  onRefreshDriverOffers,
+  onCreateSupportTicket,
+  onCreateReferral,
+  onRespondToOffer,
 }: {
   appRole: MiniAppRole;
   customer: MiniAppCustomer | null;
   config: MiniAppConfig | null;
   driverProfile: MiniAppDriverProfile | null;
+  orders: MiniAppOrder[];
+  supportTickets: SupportTicketSummary[];
+  referrals: ReferralSummary[];
+  driverOffers: MiniAppDriverOffer[];
   pendingApprovalCount: number;
   orderCount: number;
   supportText: string;
+  submittingSupportTicket: boolean;
+  creatingReferral: boolean;
+  offerActionId: number | null;
+  onRefreshSupportTickets: () => void;
+  onRefreshReferrals: () => void;
+  onRefreshDriverOffers: () => void;
+  onCreateSupportTicket: (
+    subject: string,
+    message: string,
+    category: string,
+    priority: string,
+    orderNumber?: string,
+  ) => Promise<boolean>;
+  onCreateReferral: (aliasUsername?: string, aliasEmail?: string, notes?: string) => Promise<boolean>;
+  onRespondToOffer: (offerId: number, action: 'accept' | 'decline') => void;
 }) {
   if (appRole === 'driver') {
     return (
@@ -1193,11 +1410,16 @@ function HomeView({
                 label="Pickup Hub"
                 value={driverProfile?.pickup_address?.name || 'Unassigned'}
               />
+              <DetailItem
+                label="Working Hours"
+                value={driverProfile?.working_hours_summary || 'Always available'}
+              />
             </dl>
           </article>
 
           <article className="surface stats-panel">
             <StatTile label="Assigned" value={`${driverProfile?.active_orders || 0}`} />
+            <StatTile label="Pending Offers" value={`${driverOffers.length}`} />
             <StatTile label="Delivered" value={`${driverProfile?.delivered_orders || 0}`} tone="olive" />
             <StatTile
               label="Capacity"
@@ -1206,6 +1428,13 @@ function HomeView({
             />
           </article>
         </div>
+
+        <DriverOffersPanel
+          offers={driverOffers}
+          respondingOfferId={offerActionId}
+          onRefresh={onRefreshDriverOffers}
+          onRespond={onRespondToOffer}
+        />
 
         <article className="surface support-panel">
           <div className="section-head">
@@ -1216,6 +1445,15 @@ function HomeView({
           </div>
           <p className="muted-copy">{supportText}</p>
         </article>
+
+        <SupportPanel
+          appRole={appRole}
+          tickets={supportTickets}
+          orders={orders}
+          submitting={submittingSupportTicket}
+          onRefresh={onRefreshSupportTickets}
+          onCreate={onCreateSupportTicket}
+        />
       </section>
     );
   }
@@ -1254,7 +1492,341 @@ function HomeView({
         </div>
         <p className="muted-copy">{supportText}</p>
       </article>
+
+      <div className="feature-grid">
+        <ReferralPanel
+          referrals={referrals}
+          creating={creatingReferral}
+          onRefresh={onRefreshReferrals}
+          onCreate={onCreateReferral}
+        />
+        <SupportPanel
+          appRole={appRole}
+          tickets={supportTickets}
+          orders={orders}
+          submitting={submittingSupportTicket}
+          onRefresh={onRefreshSupportTickets}
+          onCreate={onCreateSupportTicket}
+        />
+      </div>
     </section>
+  );
+}
+
+function DriverOffersPanel({
+  offers,
+  respondingOfferId,
+  onRefresh,
+  onRespond,
+}: {
+  offers: MiniAppDriverOffer[];
+  respondingOfferId: number | null;
+  onRefresh: () => void;
+  onRespond: (offerId: number, action: 'accept' | 'decline') => void;
+}) {
+  return (
+    <article className="surface">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Offer Queue</p>
+          <h3>Pending dispatch offers</h3>
+        </div>
+        <button className="secondary-button" onClick={onRefresh} type="button">
+          Refresh
+        </button>
+      </div>
+
+      {offers.length ? (
+        <div className="offer-stack">
+          {offers.map((offer) => (
+            <article key={offer.id} className="offer-card">
+              <div className="section-head compact">
+                <div>
+                  <p className="eyebrow">{offer.order_number || `Offer ${offer.id}`}</p>
+                  <h4>{humanize(offer.delivery_or_pickup || 'dispatch')}</h4>
+                </div>
+                <StatusPill tone={offer.status}>{humanize(offer.status)}</StatusPill>
+              </div>
+
+              <dl className="detail-grid">
+                <DetailItem label="Destination" value={offer.destination || 'Pending destination'} />
+                <DetailItem label="Total" value={formatCurrency(offer.total_cents || 0)} />
+                <DetailItem label="Offer #" value={`${offer.sequence_number}`} />
+                <DetailItem label="Respond By" value={formatDateTime(offer.expires_at)} />
+              </dl>
+
+              <div className="row-actions">
+                <button
+                  className="primary-button compact-button"
+                  disabled={respondingOfferId === offer.id}
+                  onClick={() => onRespond(offer.id, 'accept')}
+                  type="button"
+                >
+                  {respondingOfferId === offer.id ? 'Updating…' : 'Accept'}
+                </button>
+                <button
+                  className="ghost-button compact-button"
+                  disabled={respondingOfferId === offer.id}
+                  onClick={() => onRespond(offer.id, 'decline')}
+                  type="button"
+                >
+                  Decline
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <EmptySurface title="No pending offers" copy="New dispatch offers will appear here with accept and decline controls." compact />
+      )}
+    </article>
+  );
+}
+
+function SupportPanel({
+  appRole,
+  tickets,
+  orders,
+  submitting,
+  onRefresh,
+  onCreate,
+}: {
+  appRole: MiniAppRole;
+  tickets: SupportTicketSummary[];
+  orders: MiniAppOrder[];
+  submitting: boolean;
+  onRefresh: () => void;
+  onCreate: (
+    subject: string,
+    message: string,
+    category: string,
+    priority: string,
+    orderNumber?: string,
+  ) => Promise<boolean>;
+}) {
+  const [subject, setSubject] = useState('');
+  const [message, setMessage] = useState('');
+  const [category, setCategory] = useState('general');
+  const [priority, setPriority] = useState('normal');
+  const [orderNumber, setOrderNumber] = useState('');
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const created = await onCreate(subject.trim(), message.trim(), category, priority, orderNumber || undefined);
+    if (created) {
+      setSubject('');
+      setMessage('');
+      setCategory('general');
+      setPriority('normal');
+      setOrderNumber('');
+    }
+  }
+
+  return (
+    <article className="surface">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Support Queue</p>
+          <h3>{appRole === 'driver' ? 'Driver issues and dispatch questions' : 'Order and account support'}</h3>
+        </div>
+        <button className="secondary-button" onClick={onRefresh} type="button">
+          Refresh
+        </button>
+      </div>
+
+      <form className="stack" onSubmit={handleSubmit}>
+        <label className="field">
+          <span>Subject</span>
+          <input
+            maxLength={120}
+            placeholder="Short summary"
+            required
+            value={subject}
+            onChange={(event) => setSubject(event.target.value)}
+          />
+        </label>
+
+        <div className="support-form-grid">
+          <label className="field">
+            <span>Category</span>
+            <select value={category} onChange={(event) => setCategory(event.target.value)}>
+              <option value="general">General</option>
+              <option value="payment">Payment</option>
+              <option value="dispatch">Dispatch</option>
+              <option value="pickup">Pickup</option>
+              <option value="technical">Technical</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Priority</span>
+            <select value={priority} onChange={(event) => setPriority(event.target.value)}>
+              <option value="low">Low</option>
+              <option value="normal">Normal</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
+          </label>
+        </div>
+
+        <label className="field">
+          <span>Related order</span>
+          <select value={orderNumber} onChange={(event) => setOrderNumber(event.target.value)}>
+            <option value="">No order selected</option>
+            {orders.map((order) => (
+              <option key={`support-order-${order.order_number}`} value={order.order_number}>
+                {order.order_number} • {humanize(order.delivery_or_pickup)} • {humanize(order.status)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label className="field">
+          <span>Message</span>
+          <textarea
+            placeholder="Describe the issue, timing, and what you need from dispatch."
+            required
+            rows={4}
+            value={message}
+            onChange={(event) => setMessage(event.target.value)}
+          />
+        </label>
+
+        <button
+          className="primary-button"
+          disabled={submitting || !subject.trim() || !message.trim()}
+          type="submit"
+        >
+          {submitting ? 'Sending…' : 'Open Support Ticket'}
+        </button>
+      </form>
+
+      <div className="detail-block">
+        <h4>Recent tickets</h4>
+        {tickets.length ? (
+          <div className="ticket-stack">
+            {tickets.map((ticket) => (
+              <article key={ticket.id} className="ticket-card">
+                <div className="section-head compact">
+                  <div>
+                    <strong>{ticket.subject}</strong>
+                    <p className="helper-text">
+                      {humanize(ticket.category)} • {humanize(ticket.priority)} • {formatDateTime(ticket.created_at)}
+                    </p>
+                  </div>
+                  <StatusPill tone={ticket.status}>{humanize(ticket.status)}</StatusPill>
+                </div>
+                <p className="helper-text">{ticket.message}</p>
+                {ticket.resolution_note ? (
+                  <p className="helper-text">Resolution: {ticket.resolution_note}</p>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptySurface title="No support tickets yet" copy="New tickets you create here will show status updates from the admin queue." compact />
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ReferralPanel({
+  referrals,
+  creating,
+  onRefresh,
+  onCreate,
+}: {
+  referrals: ReferralSummary[];
+  creating: boolean;
+  onRefresh: () => void;
+  onCreate: (aliasUsername?: string, aliasEmail?: string, notes?: string) => Promise<boolean>;
+}) {
+  const [aliasUsername, setAliasUsername] = useState('');
+  const [aliasEmail, setAliasEmail] = useState('');
+  const [notes, setNotes] = useState('');
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const created = await onCreate(
+      aliasUsername.trim() || undefined,
+      aliasEmail.trim() || undefined,
+      notes.trim() || undefined,
+    );
+    if (created) {
+      setAliasUsername('');
+      setAliasEmail('');
+      setNotes('');
+    }
+  }
+
+  return (
+    <article className="surface">
+      <div className="section-head">
+        <div>
+          <p className="eyebrow">Referrals</p>
+          <h3>Create a private invite</h3>
+        </div>
+        <button className="secondary-button" onClick={onRefresh} type="button">
+          Refresh
+        </button>
+      </div>
+
+      <form className="stack" onSubmit={handleSubmit}>
+        <label className="field">
+          <span>Alias username</span>
+          <input
+            placeholder="private_member"
+            value={aliasUsername}
+            onChange={(event) => setAliasUsername(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Alias email</span>
+          <input
+            placeholder="member@example.com"
+            value={aliasEmail}
+            onChange={(event) => setAliasEmail(event.target.value)}
+          />
+        </label>
+        <label className="field">
+          <span>Internal note</span>
+          <textarea
+            placeholder="Reference name, relationship, or use case"
+            rows={3}
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+          />
+        </label>
+        <button className="primary-button" disabled={creating} type="submit">
+          {creating ? 'Creating…' : 'Create Referral Invite'}
+        </button>
+      </form>
+
+      <div className="detail-block">
+        <h4>Referral ledger</h4>
+        {referrals.length ? (
+          <div className="ticket-stack">
+            {referrals.map((referral) => (
+              <article key={referral.id} className="ticket-card">
+                <div className="section-head compact">
+                  <div>
+                    <strong>{referral.invite_code || 'Pending code'}</strong>
+                    <p className="helper-text">{formatDateTime(referral.created_at)}</p>
+                  </div>
+                  <StatusPill tone={referral.status}>{humanize(referral.status)}</StatusPill>
+                </div>
+                <p className="helper-text">
+                  Reward: {humanize(referral.reward_status)} {referral.referred_name ? `• Claimed by ${referral.referred_name}` : ''}
+                </p>
+                {referral.notes ? <p className="helper-text">{referral.notes}</p> : null}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptySurface title="No referrals yet" copy="Generate a private invite here and track when it gets claimed." compact />
+        )}
+      </div>
+    </article>
   );
 }
 

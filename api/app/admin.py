@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Request
 import os
 import random
 import shutil
@@ -21,13 +21,29 @@ import re
 from typing import List, Optional
 from .telegram_service import telegram_service
 import logging
-from .auth import verify_admin_credentials  # Add this import
+from .auth import (
+    authenticate_admin_credentials,
+    create_admin_session,
+    get_current_admin,
+    get_current_admin_actor,
+    revoke_admin_session,
+)
+from .audit_service import log_audit_event
 from .dispatch_rules import (
     ACTIVE_DRIVER_ORDER_STATUSES,
     driver_can_accept_order,
     get_driver_active_order_count,
     get_payment_label,
     normalize_order_status,
+)
+from .dispatch_service import (
+    get_order_dispatch_snapshot,
+    process_expired_dispatch_offers,
+    respond_to_dispatch_offer,
+    serialize_dispatch_offer,
+    serialize_dispatch_queue,
+    serialize_working_hours,
+    start_dispatch_queue,
 )
 from .miniapp_auth import normalize_app_role
 
@@ -36,11 +52,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 UPLOAD_DIR = "static/uploads"
-
-# Add authentication dependency to all admin routes
-def get_current_admin(username: str = Depends(verify_admin_credentials)):
-    """Dependency to ensure user is authenticated as admin"""
-    return username
 
 
 def _generate_invite_code(db: Session) -> str:
@@ -111,6 +122,89 @@ def _serialize_pickup_arrival_photo(photo: models.PickupArrivalPhoto) -> dict:
     }
 
 
+def _serialize_support_ticket(ticket: models.SupportTicket) -> dict:
+    return {
+        "id": ticket.id,
+        "customer_id": ticket.customer_id,
+        "customer_name": ticket.customer.display_name if ticket.customer else None,
+        "customer_telegram_id": ticket.customer.telegram_id if ticket.customer else None,
+        "order_number": ticket.order.order_number if ticket.order else None,
+        "role": ticket.role,
+        "category": ticket.category,
+        "priority": ticket.priority,
+        "subject": ticket.subject,
+        "message": ticket.message,
+        "status": ticket.status,
+        "assigned_admin_username": ticket.assigned_admin_username,
+        "resolution_note": ticket.resolution_note,
+        "resolved_at": ticket.resolved_at.isoformat() if ticket.resolved_at else None,
+        "created_at": ticket.created_at.isoformat() if ticket.created_at else None,
+        "updated_at": ticket.updated_at.isoformat() if ticket.updated_at else None,
+    }
+
+
+def _serialize_referral(referral: models.Referral) -> dict:
+    return {
+        "id": referral.id,
+        "invite_code": referral.invite.code if referral.invite else None,
+        "referrer_customer_id": referral.referrer_customer_id,
+        "referrer_name": referral.referrer_customer.display_name if referral.referrer_customer else None,
+        "referred_customer_id": referral.referred_customer_id,
+        "referred_name": referral.referred_customer.display_name if referral.referred_customer else None,
+        "status": referral.status,
+        "reward_status": referral.reward_status,
+        "notes": referral.notes,
+        "created_at": referral.created_at.isoformat() if referral.created_at else None,
+        "claimed_at": referral.claimed_at.isoformat() if referral.claimed_at else None,
+    }
+
+
+def _serialize_audit_log(entry: models.AuditLog) -> dict:
+    return {
+        "id": entry.id,
+        "actor_type": entry.actor_type,
+        "actor_username": entry.actor_username,
+        "actor_customer_id": entry.actor_customer_id,
+        "action": entry.action,
+        "entity_type": entry.entity_type,
+        "entity_id": entry.entity_id,
+        "payload": entry.payload or {},
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+def _serialize_delivery_settings(settings: models.Settings) -> dict:
+    return {
+        "central_location_name": settings.central_location_name,
+        "central_location_address": settings.central_location_address,
+        "central_location_lat": settings.central_location_lat,
+        "central_location_lng": settings.central_location_lng,
+        "atlantic_station_radius_miles": settings.atlantic_station_radius_miles,
+        "atlantic_station_fee_cents": settings.atlantic_station_fee_cents,
+        "inside_i285_radius_miles": settings.inside_i285_radius_miles,
+        "inside_i285_fee_cents": settings.inside_i285_fee_cents,
+        "outside_i285_radius_miles": settings.outside_i285_radius_miles,
+        "outside_i285_fee_cents": settings.outside_i285_fee_cents,
+        "max_delivery_radius_miles": settings.max_delivery_radius_miles,
+        "delivery_radius_enforced": settings.delivery_radius_enforced,
+        "dispatch_offer_timeout_seconds": settings.dispatch_offer_timeout_seconds,
+        "dispatch_auto_escalate": settings.dispatch_auto_escalate,
+        "admin_session_hours": settings.admin_session_hours,
+        "updated_at": settings.updated_at.isoformat() if settings.updated_at else None,
+    }
+
+
+def _get_or_create_settings(db: Session) -> models.Settings:
+    settings = db.query(models.Settings).first()
+    if settings:
+        return settings
+    settings = models.Settings(id=1)
+    db.add(settings)
+    db.commit()
+    db.refresh(settings)
+    return settings
+
+
 def _normalize_alias_username(alias_username: str | None) -> str | None:
     if not alias_username:
         return None
@@ -125,6 +219,66 @@ def _normalize_invite_target_role(target_role: str | None) -> str:
     if not normalized:
         raise HTTPException(status_code=400, detail="Invite role must be either 'customer' or 'driver'")
     return normalized
+
+
+@router.post("/auth/login")
+async def admin_login(
+    login_data: schemas.AdminLoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    username = authenticate_admin_credentials(
+        login_data.username,
+        login_data.password,
+        login_data.totp_code,
+    )
+    session = create_admin_session(db, username, request=request)
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=username,
+        action="admin_login",
+        entity_type="admin_session",
+        entity_id=session.id,
+        payload={"ip_address": session.ip_address},
+    )
+    db.commit()
+    return {
+        "session_token": session.session_token,
+        "username": session.username,
+        "expires_at": session.expires_at.isoformat(),
+        "requires_totp": bool(os.getenv("ADMIN_TOTP_SECRET", "").strip()),
+    }
+
+
+@router.get("/auth/me")
+async def admin_me(actor: dict = Depends(get_current_admin_actor)):
+    session = actor.get("session")
+    return {
+        "username": actor["username"],
+        "auth_type": actor["auth_type"],
+        "expires_at": session.expires_at.isoformat() if session else None,
+    }
+
+
+@router.post("/auth/logout")
+async def admin_logout(
+    db: Session = Depends(get_db),
+    actor: dict = Depends(get_current_admin_actor),
+):
+    session = actor.get("session")
+    if session:
+        revoke_admin_session(db, session)
+        log_audit_event(
+            db,
+            actor_type="admin",
+            actor_username=actor["username"],
+            action="admin_logout",
+            entity_type="admin_session",
+            entity_id=session.id,
+        )
+        db.commit()
+    return {"message": "Logged out"}
 
 @router.get("/export_csv")
 async def export_csv(date: str, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
@@ -345,6 +499,7 @@ async def create_driver(driver_data: dict, db: Session = Depends(get_db), admin:
         accepts_pickup=driver_data.get('accepts_pickup', True),
         max_delivery_distance_miles=driver_data.get('max_delivery_distance_miles', 15.0),
         max_concurrent_orders=driver_data.get('max_concurrent_orders', 1),
+        timezone=driver_data.get('timezone', 'America/New_York'),
         pickup_address_id=driver_data.get('pickup_address_id')
     )
     
@@ -368,6 +523,69 @@ async def update_driver(driver_id: int, driver_data: dict, db: Session = Depends
     db.commit()
     return {"message": "Driver updated successfully"}
 
+
+@router.get("/drivers/{driver_id}/working-hours")
+async def get_driver_working_hours(
+    driver_id: int,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    driver = db.query(models.Driver).filter(models.Driver.id == driver_id).first()
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    hours = db.query(models.DriverWorkingHours).filter(
+        models.DriverWorkingHours.driver_id == driver_id
+    ).order_by(models.DriverWorkingHours.day_of_week.asc()).all()
+    return {
+        "driver_id": driver_id,
+        "timezone": driver.timezone or "America/New_York",
+        "hours": [serialize_working_hours(entry) for entry in hours],
+    }
+
+
+@router.put("/drivers/{driver_id}/working-hours")
+async def update_driver_working_hours(
+    driver_id: int,
+    payload: schemas.DriverWorkingHoursUpdateRequest,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    driver = db.query(models.Driver).filter(models.Driver.id == driver_id).first()
+    if not driver:
+        raise HTTPException(status_code=404, detail="Driver not found")
+
+    db.query(models.DriverWorkingHours).filter(
+        models.DriverWorkingHours.driver_id == driver_id
+    ).delete()
+
+    for entry in payload.hours:
+        db.add(
+            models.DriverWorkingHours(
+                driver_id=driver_id,
+                day_of_week=entry.day_of_week,
+                start_local_time=entry.start_local_time,
+                end_local_time=entry.end_local_time,
+                active=entry.active,
+            )
+        )
+
+    if payload.timezone:
+        driver.timezone = payload.timezone
+
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="driver_working_hours_updated",
+        entity_type="driver",
+        entity_id=driver_id,
+        payload={"timezone": driver.timezone, "entries": len(payload.hours)},
+    )
+    db.commit()
+
+    return await get_driver_working_hours(driver_id, db, admin)
+
 # Order Management Endpoints
 @router.get("/orders")
 async def admin_get_orders(
@@ -383,6 +601,7 @@ async def admin_get_orders(
 @router.get("/orders/{order_number}")
 async def get_order_details(order_number: str, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
     """Get detailed order information"""
+    process_expired_dispatch_offers(db, actor_username=admin)
     order = db.query(models.Order).filter(models.Order.order_number == order_number).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -396,6 +615,7 @@ async def get_order_details(order_number: str, db: Session = Depends(get_db), ad
     pickup_arrival_photos = db.query(models.PickupArrivalPhoto).filter(
         models.PickupArrivalPhoto.order_id == order.id
     ).order_by(models.PickupArrivalPhoto.created_at.desc()).all()
+    dispatch_snapshot = get_order_dispatch_snapshot(db, order)
     
     return {
         "order_number": order.order_number,
@@ -431,6 +651,7 @@ async def get_order_details(order_number: str, db: Session = Depends(get_db), ad
         "pickup_eta_updates": [_serialize_pickup_eta_update(update) for update in pickup_eta_updates],
         "latest_pickup_arrival_photo": _serialize_pickup_arrival_photo(pickup_arrival_photos[0]) if pickup_arrival_photos else None,
         "pickup_arrival_photos": [_serialize_pickup_arrival_photo(photo) for photo in pickup_arrival_photos],
+        **dispatch_snapshot,
         "events": [
             {
                 "type": event.type,
@@ -742,6 +963,35 @@ async def assign_driver_to_order(
     
     logger.info(f"Driver assignment completed: {response_data}")
     return response_data
+
+
+@router.post("/orders/{order_number}/dispatch/start")
+async def start_order_dispatch_queue(
+    order_number: str,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    try:
+        result = start_dispatch_queue(db, order_number, actor_username=admin)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {
+        "message": "Dispatch queue processed",
+        **result,
+    }
+
+
+@router.post("/dispatch/process-expired")
+async def admin_process_expired_dispatch_offers(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    expired_count = process_expired_dispatch_offers(db, actor_username=admin)
+    return {
+        "message": "Expired dispatch offers processed",
+        "expired_count": expired_count,
+    }
 
 @router.post("/test-telegram")
 async def test_telegram_notification(test_data: dict, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
@@ -2253,18 +2503,46 @@ async def update_welcome_message(
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update welcome message")
 
+@router.get("/settings/delivery-config")
+async def get_delivery_config(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin)
+):
+    settings = _get_or_create_settings(db)
+    return _serialize_delivery_settings(settings)
+
+
+@router.put("/settings/delivery-config")
+async def update_delivery_config(
+    config_data: schemas.DeliveryConfigUpdate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin)
+):
+    settings = _get_or_create_settings(db)
+    for field, value in config_data.model_dump(exclude_unset=True).items():
+        setattr(settings, field, value)
+    settings.updated_at = datetime.now()
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="delivery_config_updated",
+        entity_type="settings",
+        entity_id=settings.id,
+        payload=config_data.model_dump(exclude_unset=True),
+    )
+    db.commit()
+    db.refresh(settings)
+    return _serialize_delivery_settings(settings)
+
+
 @router.get("/settings/btc-discount")
 async def get_btc_discount(
     db: Session = Depends(get_db),
     admin: str = Depends(get_current_admin)
 ):
     """Get BTC discount settings"""
-    settings = db.query(models.Settings).first()
-    if not settings:
-        settings = models.Settings(btc_discount_percent=0)
-        db.add(settings)
-        db.commit()
-        db.refresh(settings)
+    settings = _get_or_create_settings(db)
     
     return {
         "btc_discount_percent": settings.btc_discount_percent,
@@ -2285,13 +2563,19 @@ async def update_btc_discount(
     if not isinstance(discount_percent, int) or discount_percent < 0 or discount_percent > 100:
         raise HTTPException(status_code=400, detail="BTC discount must be a number between 0 and 100")
     
-    settings = db.query(models.Settings).first()
-    if not settings:
-        settings = models.Settings()
-        db.add(settings)
+    settings = _get_or_create_settings(db)
     
     settings.btc_discount_percent = discount_percent
     settings.updated_at = datetime.now()
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="btc_discount_updated",
+        entity_type="settings",
+        entity_id=settings.id,
+        payload={"btc_discount_percent": discount_percent},
+    )
     
     db.commit()
     db.refresh(settings)
@@ -2401,6 +2685,78 @@ async def update_contact_info(
         logger.error(f"Error updating contact info: {e}")
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update contact information")
+
+@router.get("/support-tickets")
+async def get_support_tickets(
+    status: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    query = db.query(models.SupportTicket).order_by(models.SupportTicket.created_at.desc())
+    if status:
+        query = query.filter(models.SupportTicket.status == status)
+    tickets = query.limit(200).all()
+    return [_serialize_support_ticket(ticket) for ticket in tickets]
+
+
+@router.put("/support-tickets/{ticket_id}")
+async def update_support_ticket(
+    ticket_id: int,
+    payload: schemas.AdminSupportTicketUpdate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    ticket = db.query(models.SupportTicket).filter(models.SupportTicket.id == ticket_id).first()
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Support ticket not found")
+
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(ticket, field, value)
+    if updates.get("status") == "resolved" and not ticket.resolved_at:
+        ticket.resolved_at = datetime.now()
+    elif updates.get("status") and updates.get("status") != "resolved":
+        ticket.resolved_at = None
+    ticket.updated_at = datetime.now()
+
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="support_ticket_updated",
+        entity_type="support_ticket",
+        entity_id=ticket.id,
+        payload=updates,
+    )
+    db.commit()
+    db.refresh(ticket)
+    return _serialize_support_ticket(ticket)
+
+
+@router.get("/referrals")
+async def get_referrals(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    referrals = db.query(models.Referral).order_by(models.Referral.created_at.desc()).limit(200).all()
+    return [_serialize_referral(referral) for referral in referrals]
+
+
+@router.get("/audit-logs")
+async def get_audit_logs(
+    action: Optional[str] = Query(None),
+    entity_type: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    query = db.query(models.AuditLog).order_by(models.AuditLog.created_at.desc())
+    if action:
+        query = query.filter(models.AuditLog.action == action)
+    if entity_type:
+        query = query.filter(models.AuditLog.entity_type == entity_type)
+    logs = query.limit(300).all()
+    return [_serialize_audit_log(entry) for entry in logs]
+
 
 async def notify_admin_order_status_update(
     db: Session, 

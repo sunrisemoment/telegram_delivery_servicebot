@@ -70,6 +70,12 @@ class PaymentConfirmation(BaseModel):
     notes: Optional[str] = None
 
 
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+    totp_code: Optional[str] = None
+
+
 class CustomerInviteCreate(BaseModel):
     alias_username: Optional[str] = None
     alias_email: Optional[str] = None
@@ -119,3 +125,59 @@ class MiniAppDriverOrderStatusUpdate(BaseModel):
 class MiniAppPickupEtaUpdateCreate(BaseModel):
     eta_minutes: int = Field(..., ge=1, le=240)
     note: Optional[str] = None
+
+
+class DeliveryConfigUpdate(BaseModel):
+    central_location_name: Optional[str] = None
+    central_location_address: Optional[str] = None
+    central_location_lat: Optional[float] = None
+    central_location_lng: Optional[float] = None
+    atlantic_station_radius_miles: Optional[float] = Field(default=None, ge=0)
+    atlantic_station_fee_cents: Optional[int] = Field(default=None, ge=0)
+    inside_i285_radius_miles: Optional[float] = Field(default=None, ge=0)
+    inside_i285_fee_cents: Optional[int] = Field(default=None, ge=0)
+    outside_i285_radius_miles: Optional[float] = Field(default=None, ge=0)
+    outside_i285_fee_cents: Optional[int] = Field(default=None, ge=0)
+    max_delivery_radius_miles: Optional[float] = Field(default=None, ge=0)
+    delivery_radius_enforced: Optional[bool] = None
+    dispatch_offer_timeout_seconds: Optional[int] = Field(default=None, ge=15, le=3600)
+    dispatch_auto_escalate: Optional[bool] = None
+    admin_session_hours: Optional[int] = Field(default=None, ge=1, le=168)
+
+
+class DriverWorkingHourUpdate(BaseModel):
+    day_of_week: int = Field(..., ge=0, le=6)
+    start_local_time: str
+    end_local_time: str
+    active: bool = True
+
+
+class DriverWorkingHoursUpdateRequest(BaseModel):
+    timezone: Optional[str] = None
+    hours: List[DriverWorkingHourUpdate]
+
+
+class DriverOfferResponse(BaseModel):
+    action: str
+    note: Optional[str] = None
+
+
+class MiniAppSupportTicketCreate(BaseModel):
+    subject: str
+    message: str
+    category: str = "general"
+    priority: str = "normal"
+    order_number: Optional[str] = None
+
+
+class AdminSupportTicketUpdate(BaseModel):
+    status: Optional[str] = None
+    priority: Optional[str] = None
+    assigned_admin_username: Optional[str] = None
+    resolution_note: Optional[str] = None
+
+
+class MiniAppReferralCreate(BaseModel):
+    alias_username: Optional[str] = None
+    alias_email: Optional[str] = None
+    notes: Optional[str] = None

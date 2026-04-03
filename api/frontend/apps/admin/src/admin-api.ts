@@ -1,9 +1,31 @@
-import { ApiError, requestWithToken } from '@shared/api';
+import { ApiError, requestJson, requestWithBearer } from '@shared/api';
+import type { AdminSessionSummary } from '@shared/types';
 
 export const ADMIN_API_BASE = import.meta.env.VITE_ADMIN_API_BASE ?? '/admin';
 
 export async function adminRequest<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
-  return requestWithToken<T>(`${ADMIN_API_BASE}${path}`, token, init);
+  return requestWithBearer<T>(`${ADMIN_API_BASE}${path}`, token, init);
+}
+
+export async function loginAdmin(
+  username: string,
+  password: string,
+  totpCode?: string,
+): Promise<AdminSessionSummary> {
+  return requestJson<AdminSessionSummary>(`${ADMIN_API_BASE}/auth/login`, {
+    method: 'POST',
+    body: JSON.stringify({
+      username,
+      password,
+      totp_code: totpCode || null,
+    }),
+  });
+}
+
+export async function logoutAdmin(token: string): Promise<{ message: string }> {
+  return adminRequest<{ message: string }>(token, '/auth/logout', {
+    method: 'POST',
+  });
 }
 
 export function isUnauthorizedError(error: unknown): error is ApiError {
