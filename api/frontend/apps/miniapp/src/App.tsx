@@ -952,6 +952,16 @@ function App() {
   }, [cart]);
 
   useEffect(() => {
+    document.body.classList.toggle('miniapp-customer-theme', !isDriverApp);
+    document.body.classList.toggle('miniapp-driver-theme', isDriverApp);
+
+    return () => {
+      document.body.classList.remove('miniapp-customer-theme');
+      document.body.classList.remove('miniapp-driver-theme');
+    };
+  }, [isDriverApp]);
+
+  useEffect(() => {
     if (isDriverApp && activeView === 'menu') {
       setActiveView('home');
     }
@@ -1145,7 +1155,7 @@ function App() {
   }, {});
 
   return (
-    <div className="miniapp-shell">
+    <div className={`miniapp-shell ${isDriverApp ? 'driver-theme' : 'customer-theme'}`}>
       <header className="miniapp-hero">
         <div>
           <p className="eyebrow">Private Delivery Club</p>

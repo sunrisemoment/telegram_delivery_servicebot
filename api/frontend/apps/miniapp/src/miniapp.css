@@ -8,6 +8,7 @@
   --ink: #191711;
   --muted: #665f53;
   --accent: #9c3f21;
+  --accent-alt: #c86b3a;
   --accent-strong: #7e2e16;
   --olive: #315746;
   --warning: #be7418;
@@ -38,6 +39,13 @@ body {
     linear-gradient(180deg, var(--tg-bg) 0%, var(--bg) 100%);
 }
 
+body.miniapp-customer-theme {
+  background:
+    radial-gradient(circle at top right, rgba(129, 160, 113, 0.24), transparent 24%),
+    radial-gradient(circle at left bottom, rgba(75, 114, 78, 0.18), transparent 18%),
+    linear-gradient(180deg, #f0eedf 0%, #dce3ce 100%);
+}
+
 h1,
 h2,
 h3,
@@ -61,6 +69,40 @@ button {
   max-width: 1460px;
   margin: 0 auto;
   padding: 18px;
+}
+
+.miniapp-shell.customer-theme {
+  --tg-bg: #f0eedf;
+  --tg-button: #486b49;
+  --tg-button-text: #f7f5ea;
+  --bg: #dce3ce;
+  --panel: rgba(249, 247, 238, 0.9);
+  --panel-strong: rgba(252, 251, 246, 0.97);
+  --ink: #182016;
+  --muted: #5e6758;
+  --accent: #56724d;
+  --accent-alt: #7d9c6b;
+  --accent-strong: #355234;
+  --olive: #294432;
+  --warning: #a77a2f;
+  --border: rgba(44, 60, 39, 0.12);
+  --shadow: 0 24px 56px rgba(42, 56, 32, 0.14);
+}
+
+.miniapp-shell.customer-theme .miniapp-hero,
+.miniapp-shell.customer-theme .surface {
+  background:
+    linear-gradient(135deg, rgba(252, 250, 244, 0.95), rgba(232, 239, 221, 0.86));
+}
+
+.miniapp-shell.customer-theme .hero-badge {
+  background: rgba(86, 114, 77, 0.14);
+  color: var(--accent-strong);
+}
+
+.miniapp-shell.customer-theme .hero-badge.active {
+  background: rgba(41, 68, 50, 0.14);
+  color: var(--olive);
 }
 
 .miniapp-hero,
@@ -189,12 +231,12 @@ button {
 
 .tab.active,
 .toggle-button.active {
-  background: linear-gradient(135deg, var(--ink), #403523);
+  background: linear-gradient(135deg, var(--olive), var(--accent-strong));
   color: #fff7ed;
 }
 
 .primary-button {
-  background: linear-gradient(135deg, var(--accent), #c86b3a);
+  background: linear-gradient(135deg, var(--accent), var(--accent-alt));
   color: #fff8ef;
 }
 
