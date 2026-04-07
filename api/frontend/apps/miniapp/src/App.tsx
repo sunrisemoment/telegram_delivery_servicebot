@@ -222,6 +222,28 @@ function openExternalLink(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer');
 }
 
+function normalizePhoneHref(phone: string): string {
+  const normalized = phone.replace(/[^\d+]/g, '');
+  return normalized ? `tel:${normalized}` : `tel:${phone}`;
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const input = document.createElement('textarea');
+  input.value = value;
+  input.setAttribute('readonly', 'true');
+  input.style.position = 'absolute';
+  input.style.left = '-9999px';
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand('copy');
+  document.body.removeChild(input);
+}
+
 async function miniappRequest<T>(token: string, path: string, init: RequestInit = {}): Promise<T> {
   return requestWithBearer<T>(`${MINIAPP_API_BASE}${path}`, token, init);
 }
@@ -2004,6 +2026,10 @@ function OrdersView({
                   <dl className="detail-grid">
                     <DetailItem label="Customer" value={order.customer_name || 'Unknown'} />
                     <DetailItem label="Phone" value={order.customer_phone || 'Not provided'} />
+                    <DetailItem
+                      label="Telegram ID"
+                      value={order.customer_telegram_id ? String(order.customer_telegram_id) : 'Not provided'}
+                    />
                     <DetailItem label="Type" value={humanize(order.delivery_or_pickup)} />
                     <DetailItem label="Destination" value={destination} />
                     <DetailItem label="Payment" value={order.payment_label} />
@@ -2011,6 +2037,41 @@ function OrdersView({
                   </dl>
 
                   {order.notes ? <p className="helper-text">{order.notes}</p> : null}
+
+                  {order.customer_phone || order.customer_telegram_id ? (
+                    <div className="row-actions">
+                      {order.customer_phone ? (
+                        <>
+                          <a
+                            className="secondary-button compact-button action-link"
+                            href={normalizePhoneHref(order.customer_phone)}
+                          >
+                            Call Customer
+                          </a>
+                          <button
+                            className="ghost-button compact-button"
+                            onClick={() => {
+                              void copyText(order.customer_phone || '');
+                            }}
+                            type="button"
+                          >
+                            Copy Phone
+                          </button>
+                        </>
+                      ) : null}
+                      {order.customer_telegram_id ? (
+                        <button
+                          className="ghost-button compact-button"
+                          onClick={() => {
+                            void copyText(String(order.customer_telegram_id));
+                          }}
+                          type="button"
+                        >
+                          Copy Telegram ID
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
 
                   {order.delivery_or_pickup === 'pickup' ? (
                     <div className="pickup-signal-panel">

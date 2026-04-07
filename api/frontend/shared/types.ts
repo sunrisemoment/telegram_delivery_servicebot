@@ -414,6 +414,7 @@ export interface MiniAppOrder {
   items: OrderSummary['items'];
   notes?: string | null;
   customer_name?: string | null;
+  customer_telegram_id?: number | null;
   customer_phone?: string | null;
   driver_name?: string | null;
   delivery_slot_et?: string | null;

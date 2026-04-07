@@ -176,6 +176,7 @@ def _serialize_order(order: models.Order) -> dict:
         "items": order.items,
         "notes": order.notes,
         "customer_name": order.customer.display_name if order.customer else None,
+        "customer_telegram_id": order.customer.telegram_id if order.customer else None,
         "customer_phone": order.customer.phone if order.customer else None,
         "driver_name": order.driver.name if order.driver else None,
         "delivery_slot_et": order.delivery_slot_et.isoformat() if order.delivery_slot_et else None,

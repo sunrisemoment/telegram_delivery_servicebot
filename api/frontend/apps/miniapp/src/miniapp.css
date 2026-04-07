@@ -519,6 +519,13 @@ textarea {
   text-decoration: none;
 }
 
+.action-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .pickup-proof-link:hover {
   text-decoration: underline;
 }
