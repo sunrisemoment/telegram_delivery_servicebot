@@ -122,6 +122,14 @@ class MiniAppDriverOrderStatusUpdate(BaseModel):
     status: str
 
 
+class MiniAppDriverDeliveryTimeUpdate(BaseModel):
+    delivery_slot_et: datetime
+
+
+class MiniAppDriverPickupLocationUpdate(BaseModel):
+    pickup_address_id: int
+
+
 class MiniAppPickupEtaUpdateCreate(BaseModel):
     eta_minutes: int = Field(..., ge=1, le=240)
     note: Optional[str] = None

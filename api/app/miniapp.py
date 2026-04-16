@@ -719,7 +719,6 @@ async def miniapp_pickup_addresses(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
-    _require_customer_role(customer)
     pickup_addresses = db.query(models.PickupAddress).filter(
         models.PickupAddress.active.is_(True)
     ).all()
@@ -860,7 +859,7 @@ async def miniapp_create_order(
         delivery_address_text=delivery_address_text,
         notes=order_data.notes,
         payment_type=payment_type,
-        delivery_slot_et=order_data.delivery_slot_et,
+        delivery_slot_et=order_data.delivery_slot_et if delivery_or_pickup == "pickup" else None,
         payment_metadata=payment_metadata,
     )
     order = crud.create_order(db, order_create)
@@ -1215,6 +1214,126 @@ async def miniapp_update_driver_profile(
     db.commit()
     db.refresh(driver)
     return _serialize_driver_profile(db, driver)
+
+
+@router.post("/driver/orders/{order_number}/delivery-time")
+async def miniapp_update_driver_delivery_time(
+    order_number: str,
+    slot_data: schemas.MiniAppDriverDeliveryTimeUpdate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    driver = _get_driver_for_customer(db, customer)
+    order = db.query(models.Order).filter(
+        models.Order.order_number == order_number,
+        models.Order.driver_id == driver.id,
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Assigned order not found")
+    if order.delivery_or_pickup != "delivery":
+        raise HTTPException(status_code=400, detail="Delivery time can only be updated for delivery orders")
+
+    previous_slot = order.delivery_slot_et.isoformat() if order.delivery_slot_et else None
+    order.delivery_slot_et = slot_data.delivery_slot_et
+    order.updated_at = datetime.now(timezone.utc)
+    db.add(
+        models.OrderEvent(
+            order_id=order.id,
+            type="miniapp_driver_delivery_time_updated",
+            payload={
+                "driver_id": driver.id,
+                "driver_telegram_id": driver.telegram_id,
+                "previous_slot": previous_slot,
+                "new_slot": slot_data.delivery_slot_et.isoformat(),
+                "source": "miniapp",
+            },
+        )
+    )
+    db.commit()
+    db.refresh(order)
+
+    if order.customer and order.customer.telegram_id:
+        telegram_service.send_message(
+            order.customer.telegram_id,
+            (
+                "🕒 <b>Delivery Time Updated</b>\n\n"
+                f"📦 <b>Order #:</b> <code>{order.order_number}</code>\n"
+                f"🚗 <b>Driver:</b> {escape(driver.name or 'Driver')}\n"
+                f"🕐 <b>Updated delivery time:</b> {slot_data.delivery_slot_et.strftime('%Y-%m-%d %H:%M')}"
+            ),
+        )
+
+    return {
+        "message": "Delivery time updated",
+        "order": _serialize_order(order),
+        "driver_profile": _serialize_driver_profile(db, driver),
+    }
+
+
+@router.post("/driver/orders/{order_number}/pickup-location")
+async def miniapp_update_driver_pickup_location(
+    order_number: str,
+    location_data: schemas.MiniAppDriverPickupLocationUpdate,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    driver = _get_driver_for_customer(db, customer)
+    order = db.query(models.Order).filter(
+        models.Order.order_number == order_number,
+        models.Order.driver_id == driver.id,
+    ).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Assigned order not found")
+    if order.delivery_or_pickup != "pickup":
+        raise HTTPException(status_code=400, detail="Pickup location can only be updated for pickup orders")
+
+    pickup_address = db.query(models.PickupAddress).filter(
+        models.PickupAddress.id == location_data.pickup_address_id,
+        models.PickupAddress.active.is_(True),
+    ).first()
+    if not pickup_address:
+        raise HTTPException(status_code=404, detail="Pickup location not found")
+
+    previous_address = order.pickup_address_text
+    order.pickup_address_text = f"{pickup_address.name} - {pickup_address.address}"
+    order.updated_at = datetime.now(timezone.utc)
+    driver.pickup_address_id = pickup_address.id
+    db.add(
+        models.OrderEvent(
+            order_id=order.id,
+            type="miniapp_driver_pickup_location_updated",
+            payload={
+                "driver_id": driver.id,
+                "driver_telegram_id": driver.telegram_id,
+                "previous_address": previous_address,
+                "new_address": order.pickup_address_text,
+                "pickup_address_id": pickup_address.id,
+                "source": "miniapp",
+            },
+        )
+    )
+    db.commit()
+    db.refresh(order)
+    db.refresh(driver)
+
+    if order.customer and order.customer.telegram_id:
+        instructions = f"\n📝 <b>Instructions:</b> {escape(pickup_address.instructions)}" if pickup_address.instructions else ""
+        telegram_service.send_message(
+            order.customer.telegram_id,
+            (
+                "📍 <b>Pickup Location Updated</b>\n\n"
+                f"📦 <b>Order #:</b> <code>{order.order_number}</code>\n"
+                f"🚗 <b>Driver:</b> {escape(driver.name or 'Driver')}\n"
+                f"📍 <b>Pickup location:</b>\n{escape(pickup_address.name)}\n{escape(pickup_address.address)}"
+                f"{instructions}"
+            ),
+        )
+
+    return {
+        "message": "Pickup location updated",
+        "order": _serialize_order(order),
+        "driver_profile": _serialize_driver_profile(db, driver),
+    }
 
 
 @router.post("/driver/orders/{order_number}/status")

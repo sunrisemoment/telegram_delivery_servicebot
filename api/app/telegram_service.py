@@ -74,7 +74,8 @@ class TelegramService:
                     delivery_dt = datetime.fromisoformat(order.delivery_slot_et.replace('Z', '+00:00'))
                 else:
                     delivery_dt = order.delivery_slot_et
-                delivery_time = f"\n🕐 <b>Delivery Time:</b> {delivery_dt.strftime('%Y-%m-%d %H:%M')}"
+                slot_label = "Delivery Time" if order.delivery_or_pickup == 'delivery' else "Arrival Time"
+                delivery_time = f"\n🕐 <b>{slot_label}:</b> {delivery_dt.strftime('%Y-%m-%d %H:%M')}"
             
             # Format items and calculate total
             items_text = ""

@@ -213,6 +213,24 @@ function formatPickupEtaValue(order: MiniAppOrder): string {
   return `${order.latest_pickup_eta.eta_minutes} min away • ${formatDateTime(order.latest_pickup_eta.created_at)}`;
 }
 
+function formatOrderTimeValue(order: MiniAppOrder, emptyLabel: string): string {
+  return order.delivery_slot_et ? formatDateTime(order.delivery_slot_et) : emptyLabel;
+}
+
+function toDateTimeLocalInputValue(value: string | null | undefined): string {
+  if (!value) {
+    return '';
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return '';
+  }
+
+  const adjusted = new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60_000);
+  return adjusted.toISOString().slice(0, 16);
+}
+
 function openExternalLink(url: string): void {
   const telegram = getTelegramApp();
   if (telegram?.openLink) {
@@ -257,6 +275,8 @@ function App() {
   const [savingAddress, setSavingAddress] = useState(false);
   const [savingDriverProfile, setSavingDriverProfile] = useState(false);
   const [driverActionOrderNumber, setDriverActionOrderNumber] = useState('');
+  const [driverPickupLocationOrderNumber, setDriverPickupLocationOrderNumber] = useState('');
+  const [driverDeliveryTimeOrderNumber, setDriverDeliveryTimeOrderNumber] = useState('');
   const [pickupEtaOrderNumber, setPickupEtaOrderNumber] = useState('');
   const [pickupPhotoOrderNumber, setPickupPhotoOrderNumber] = useState('');
   const [activeView, setActiveView] = useState<ViewKey>('home');
@@ -284,7 +304,6 @@ function App() {
   const [deliveryMode, setDeliveryMode] = useState<DeliveryMode>('delivery');
   const [deliveryAddressId, setDeliveryAddressId] = useState('');
   const [manualAddress, setManualAddress] = useState('');
-  const [pickupAddressId, setPickupAddressId] = useState('');
   const [paymentType, setPaymentType] = useState<PaymentType>('cash');
   const [deliverySlot, setDeliverySlot] = useState('');
   const [notes, setNotes] = useState('');
@@ -345,9 +364,7 @@ function App() {
           nextRole === 'customer'
             ? miniappRequest<CustomerAddress[]>(token, '/addresses')
             : Promise.resolve<CustomerAddress[]>([]),
-          nextRole === 'customer'
-            ? miniappRequest<PickupLocation[]>(token, '/pickup-addresses')
-            : Promise.resolve<PickupLocation[]>([]),
+          miniappRequest<PickupLocation[]>(token, '/pickup-addresses'),
           miniappRequest<SupportTicketSummary[]>(token, '/support-tickets'),
           nextRole === 'customer'
             ? miniappRequest<ReferralSummary[]>(token, '/referrals')
@@ -369,7 +386,7 @@ function App() {
       } else {
         setMenu([]);
         setAddresses([]);
-        setPickupLocations([]);
+        setPickupLocations(Array.isArray(pickupResponse) ? pickupResponse : []);
         setReferrals([]);
         setDriverOffers(Array.isArray(offersResponse) ? offersResponse : []);
         setCart([]);
@@ -673,6 +690,58 @@ function App() {
     }
   }
 
+  async function updateDriverPickupLocation(orderNumber: string, pickupAddressId: number) {
+    if (!sessionToken || !isDriverApp) {
+      return;
+    }
+
+    setDriverPickupLocationOrderNumber(orderNumber);
+    try {
+      await miniappRequest(sessionToken, `/driver/orders/${orderNumber}/pickup-location`, {
+        method: 'POST',
+        body: JSON.stringify({ pickup_address_id: pickupAddressId }),
+      });
+      await Promise.all([refreshOrders(sessionToken), refreshConfig(sessionToken)]);
+      pushToast(`Pickup location updated for ${orderNumber}`);
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setDriverPickupLocationOrderNumber('');
+    }
+  }
+
+  async function updateDriverDeliveryTime(orderNumber: string, deliveryTime: string) {
+    if (!sessionToken || !isDriverApp) {
+      return;
+    }
+
+    setDriverDeliveryTimeOrderNumber(orderNumber);
+    try {
+      await miniappRequest(sessionToken, `/driver/orders/${orderNumber}/delivery-time`, {
+        method: 'POST',
+        body: JSON.stringify({ delivery_slot_et: deliveryTime }),
+      });
+      await refreshOrders(sessionToken);
+      pushToast(`Delivery time updated for ${orderNumber}`);
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setDriverDeliveryTimeOrderNumber('');
+    }
+  }
+
   async function submitPickupEta(orderNumber: string, etaMinutes: number, note?: string) {
     if (!sessionToken || isDriverApp) {
       return;
@@ -865,14 +934,9 @@ function App() {
 
     const resolvedManualAddress = manualAddress.trim();
     const resolvedDeliveryAddressId = deliveryAddressId ? Number(deliveryAddressId) : null;
-    const resolvedPickupAddressId = pickupAddressId ? Number(pickupAddressId) : null;
 
     if (deliveryMode === 'delivery' && !resolvedDeliveryAddressId && !resolvedManualAddress) {
       pushToast('Select or enter a delivery address.', 'error');
-      return;
-    }
-    if (deliveryMode === 'pickup' && !resolvedPickupAddressId) {
-      pushToast('Select a pickup location.', 'error');
       return;
     }
 
@@ -891,9 +955,9 @@ function App() {
           delivery_address_id: deliveryMode === 'delivery' && resolvedDeliveryAddressId ? resolvedDeliveryAddressId : null,
           delivery_address_text:
             deliveryMode === 'delivery' && !resolvedDeliveryAddressId ? resolvedManualAddress : null,
-          pickup_address_id: deliveryMode === 'pickup' ? resolvedPickupAddressId : null,
+          pickup_address_id: null,
           payment_type: paymentType,
-          delivery_slot_et: deliverySlot || null,
+          delivery_slot_et: deliveryMode === 'pickup' ? deliverySlot || null : null,
           notes: notes.trim() || null,
         }),
       });
@@ -1000,19 +1064,6 @@ function App() {
       setDeliveryAddressId(String(defaultAddress.id));
     }
   }, [addresses, deliveryAddressId, manualAddress]);
-
-  useEffect(() => {
-    if (!pickupLocations.length) {
-      if (pickupAddressId) {
-        setPickupAddressId('');
-      }
-      return;
-    }
-
-    if (!pickupAddressId || !pickupLocations.some((location) => String(location.id) === pickupAddressId)) {
-      setPickupAddressId(String(pickupLocations[0].id));
-    }
-  }, [pickupLocations, pickupAddressId]);
 
   useEffect(() => {
     const { telegram, initData, startParam } = resolveTelegramLaunchContext();
@@ -1234,11 +1285,16 @@ function App() {
               <OrdersView
                 appRole={appRole}
                 orders={orders}
+                pickupLocations={pickupLocations}
                 busyOrderNumber={driverActionOrderNumber}
+                driverPickupLocationBusyOrderNumber={driverPickupLocationOrderNumber}
+                driverDeliveryTimeBusyOrderNumber={driverDeliveryTimeOrderNumber}
                 pickupEtaBusyOrderNumber={pickupEtaOrderNumber}
                 pickupPhotoBusyOrderNumber={pickupPhotoOrderNumber}
                 onRefresh={() => void refreshOrders()}
                 onDriverStatusChange={updateDriverOrderStatus}
+                onDriverPickupLocationUpdate={updateDriverPickupLocation}
+                onDriverDeliveryTimeUpdate={updateDriverDeliveryTime}
                 onPickupEtaUpdate={submitPickupEta}
                 onPickupArrivalUpload={uploadPickupArrivalPhoto}
               />
@@ -1279,12 +1335,10 @@ function App() {
                 deliveryMode={deliveryMode}
                 deliveryAddressId={deliveryAddressId}
                 manualAddress={manualAddress}
-                pickupAddressId={pickupAddressId}
                 paymentType={paymentType}
                 deliverySlot={deliverySlot}
                 notes={notes}
                 addresses={addresses}
-                pickupLocations={pickupLocations}
                 placingOrder={placingOrder}
                 onDeliveryMode={setDeliveryMode}
                 onDeliveryAddressChange={(value) => {
@@ -1299,7 +1353,6 @@ function App() {
                     setDeliveryAddressId('');
                   }
                 }}
-                onPickupAddressChange={setPickupAddressId}
                 onPaymentType={setPaymentType}
                 onDeliverySlot={setDeliverySlot}
                 onNotes={setNotes}
@@ -1951,21 +2004,31 @@ function MenuView({
 function OrdersView({
   appRole,
   orders,
+  pickupLocations,
   busyOrderNumber,
+  driverPickupLocationBusyOrderNumber,
+  driverDeliveryTimeBusyOrderNumber,
   pickupEtaBusyOrderNumber,
   pickupPhotoBusyOrderNumber,
   onRefresh,
   onDriverStatusChange,
+  onDriverPickupLocationUpdate,
+  onDriverDeliveryTimeUpdate,
   onPickupEtaUpdate,
   onPickupArrivalUpload,
 }: {
   appRole: MiniAppRole;
   orders: MiniAppOrder[];
+  pickupLocations: PickupLocation[];
   busyOrderNumber: string;
+  driverPickupLocationBusyOrderNumber: string;
+  driverDeliveryTimeBusyOrderNumber: string;
   pickupEtaBusyOrderNumber: string;
   pickupPhotoBusyOrderNumber: string;
   onRefresh: () => void;
   onDriverStatusChange: (orderNumber: string, status: 'out_for_delivery' | 'delivered') => Promise<void>;
+  onDriverPickupLocationUpdate: (orderNumber: string, pickupAddressId: number) => Promise<void>;
+  onDriverDeliveryTimeUpdate: (orderNumber: string, deliveryTime: string) => Promise<void>;
   onPickupEtaUpdate: (orderNumber: string, etaMinutes: number, note?: string) => Promise<void>;
   onPickupArrivalUpload: (orderNumber: string, photo: File, parkingNote?: string) => Promise<void>;
 }) {
@@ -1994,6 +2057,28 @@ function OrdersView({
     event.currentTarget.reset();
   }
 
+  async function handleDriverPickupLocationSubmit(event: FormEvent<HTMLFormElement>, orderNumber: string) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const pickupAddressId = Number(formData.get('pickup_address_id'));
+    if (!Number.isFinite(pickupAddressId) || pickupAddressId <= 0) {
+      return;
+    }
+
+    await onDriverPickupLocationUpdate(orderNumber, pickupAddressId);
+  }
+
+  async function handleDriverDeliveryTimeSubmit(event: FormEvent<HTMLFormElement>, orderNumber: string) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const deliveryTime = String(formData.get('delivery_slot_et') || '').trim();
+    if (!deliveryTime) {
+      return;
+    }
+
+    await onDriverDeliveryTimeUpdate(orderNumber, deliveryTime);
+  }
+
   if (appRole === 'driver') {
     return (
       <section className="view-stack">
@@ -2014,8 +2099,14 @@ function OrdersView({
             {orders.map((order) => {
               const canStartDelivery = ['assigned', 'preparing', 'ready', 'scheduled'].includes(order.status);
               const canCompleteDelivery = order.status === 'out_for_delivery';
-              const destination = order.delivery_address_text || order.pickup_address_text || 'Pending';
+              const destination =
+                order.delivery_or_pickup === 'pickup'
+                  ? order.pickup_address_text || 'Select pickup location below'
+                  : order.delivery_address_text || 'Pending';
               const isBusy = busyOrderNumber === order.order_number;
+              const selectedPickupLocationId = pickupLocations.find(
+                (location) => `${location.name} - ${location.address}` === order.pickup_address_text,
+              )?.id;
               return (
                 <article key={order.order_number} className="surface order-card">
                   <div className="section-head compact">
@@ -2041,6 +2132,13 @@ function OrdersView({
                       value={order.customer_telegram_id ? String(order.customer_telegram_id) : 'Not provided'}
                     />
                     <DetailItem label="Type" value={humanize(order.delivery_or_pickup)} />
+                    <DetailItem
+                      label={order.delivery_or_pickup === 'pickup' ? 'Arrival Time' : 'Delivery Time'}
+                      value={formatOrderTimeValue(
+                        order,
+                        order.delivery_or_pickup === 'pickup' ? 'Not provided' : 'Not set yet',
+                      )}
+                    />
                     <DetailItem label="Destination" value={destination} />
                     <DetailItem label="Payment" value={order.payment_label} />
                     <DetailItem label="Created" value={formatDateTime(order.created_at)} />
@@ -2132,8 +2230,87 @@ function OrdersView({
                       ) : (
                         <p className="helper-text">The customer has not uploaded arrival proof yet.</p>
                       )}
+
+                      {!['cancelled', 'delivered'].includes(order.status) ? (
+                        <form
+                          className="pickup-form"
+                          onSubmit={(event) => void handleDriverPickupLocationSubmit(event, order.order_number)}
+                        >
+                          <label className="field">
+                            <span>Pickup location</span>
+                            <select
+                              defaultValue={selectedPickupLocationId ? String(selectedPickupLocationId) : ''}
+                              name="pickup_address_id"
+                              required
+                            >
+                              <option value="" disabled>
+                                Select pickup location
+                              </option>
+                              {pickupLocations.map((location) => (
+                                <option key={`driver-pickup-${location.id}`} value={location.id}>
+                                  {location.name} - {location.address}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <button
+                            className="secondary-button compact-button"
+                            disabled={driverPickupLocationBusyOrderNumber === order.order_number}
+                            type="submit"
+                          >
+                            {driverPickupLocationBusyOrderNumber === order.order_number
+                              ? 'Saving…'
+                              : order.pickup_address_text
+                                ? 'Update Pickup Location'
+                                : 'Set Pickup Location'}
+                          </button>
+                        </form>
+                      ) : null}
                     </div>
-                  ) : null}
+                  ) : (
+                    <div className="pickup-signal-panel">
+                      <div className="section-head compact">
+                        <div>
+                          <p className="eyebrow">Delivery Time</p>
+                          <h4>{formatOrderTimeValue(order, 'Set the delivery time')}</h4>
+                        </div>
+                        <span className="badge">
+                          {order.delivery_slot_et ? 'Customer notified' : 'Awaiting driver update'}
+                        </span>
+                      </div>
+                      <p className="helper-text">
+                        Set the customer-facing delivery time here and update it again if traffic or dispatch changes.
+                      </p>
+
+                      {!['cancelled', 'delivered'].includes(order.status) ? (
+                        <form
+                          className="pickup-form"
+                          onSubmit={(event) => void handleDriverDeliveryTimeSubmit(event, order.order_number)}
+                        >
+                          <label className="field">
+                            <span>Delivery time</span>
+                            <input
+                              defaultValue={toDateTimeLocalInputValue(order.delivery_slot_et)}
+                              name="delivery_slot_et"
+                              required
+                              type="datetime-local"
+                            />
+                          </label>
+                          <button
+                            className="secondary-button compact-button"
+                            disabled={driverDeliveryTimeBusyOrderNumber === order.order_number}
+                            type="submit"
+                          >
+                            {driverDeliveryTimeBusyOrderNumber === order.order_number
+                              ? 'Saving…'
+                              : order.delivery_slot_et
+                                ? 'Update Delivery Time'
+                                : 'Set Delivery Time'}
+                          </button>
+                        </form>
+                      ) : null}
+                    </div>
+                  )}
 
                   <div className="row-actions">
                     {canStartDelivery ? (
@@ -2206,8 +2383,21 @@ function OrdersView({
                 <DetailItem label="Payment" value={order.payment_label} />
                 <DetailItem label="Type" value={humanize(order.delivery_or_pickup)} />
                 <DetailItem
+                  label={order.delivery_or_pickup === 'pickup' ? 'Arrival Time' : 'Delivery Time'}
+                  value={formatOrderTimeValue(
+                    order,
+                    order.delivery_or_pickup === 'pickup'
+                      ? 'Not provided yet'
+                      : 'Driver will confirm after assignment',
+                  )}
+                />
+                <DetailItem
                   label="Destination"
-                  value={order.delivery_address_text || order.pickup_address_text || 'Pending'}
+                  value={
+                    order.delivery_or_pickup === 'pickup'
+                      ? order.pickup_address_text || 'Driver will choose pickup location'
+                      : order.delivery_address_text || 'Pending'
+                  }
                 />
                 <DetailItem label="Created" value={formatDateTime(order.created_at)} />
               </dl>
@@ -2563,17 +2753,14 @@ function CartView({
   deliveryMode,
   deliveryAddressId,
   manualAddress,
-  pickupAddressId,
   paymentType,
   deliverySlot,
   notes,
   addresses,
-  pickupLocations,
   placingOrder,
   onDeliveryMode,
   onDeliveryAddressChange,
   onManualAddressChange,
-  onPickupAddressChange,
   onPaymentType,
   onDeliverySlot,
   onNotes,
@@ -2589,17 +2776,14 @@ function CartView({
   deliveryMode: DeliveryMode;
   deliveryAddressId: string;
   manualAddress: string;
-  pickupAddressId: string;
   paymentType: PaymentType;
   deliverySlot: string;
   notes: string;
   addresses: CustomerAddress[];
-  pickupLocations: PickupLocation[];
   placingOrder: boolean;
   onDeliveryMode: (value: DeliveryMode) => void;
   onDeliveryAddressChange: (value: string) => void;
   onManualAddressChange: (value: string) => void;
-  onPickupAddressChange: (value: string) => void;
   onPaymentType: (value: PaymentType) => void;
   onDeliverySlot: (value: string) => void;
   onNotes: (value: string) => void;
@@ -2686,16 +2870,15 @@ function CartView({
             </label>
           </div>
         ) : (
-          <label className="field">
-            <span>Pickup location</span>
-            <select value={pickupAddressId} onChange={(event) => onPickupAddressChange(event.target.value)}>
-              {pickupLocations.map((location) => (
-                <option key={location.id} value={location.id}>
-                  {location.name} - {location.address}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="summary-box">
+            <div>
+              <span>Pickup location</span>
+              <strong>Chosen by driver</strong>
+            </div>
+            <p className="helper-text">
+              Your driver will confirm the pickup location after assignment. You can still share your arrival time below.
+            </p>
+          </div>
         )}
 
         <label className="field">
@@ -2708,10 +2891,22 @@ function CartView({
           </select>
         </label>
 
-        <label className="field">
-          <span>Requested time</span>
-          <input type="datetime-local" value={deliverySlot} onChange={(event) => onDeliverySlot(event.target.value)} />
-        </label>
+        {deliveryMode === 'pickup' ? (
+          <label className="field">
+            <span>Arrival time</span>
+            <input type="datetime-local" value={deliverySlot} onChange={(event) => onDeliverySlot(event.target.value)} />
+          </label>
+        ) : (
+          <div className="summary-box">
+            <div>
+              <span>Delivery time</span>
+              <strong>Provided by driver</strong>
+            </div>
+            <p className="helper-text">
+              Your driver will set the delivery time after assignment and update it if anything changes.
+            </p>
+          </div>
+        )}
 
         <label className="field">
           <span>Notes</span>
@@ -2719,7 +2914,7 @@ function CartView({
             rows={4}
             value={notes}
             onChange={(event) => onNotes(event.target.value)}
-            placeholder="Door code, parking notes, or pickup preference"
+            placeholder="Door code, parking notes, car type/color, or pickup preference"
           />
         </label>
 
@@ -2738,7 +2933,7 @@ function CartView({
           </div>
           <p className="helper-text">
             {deliveryMode === 'pickup'
-              ? 'Pickup orders still require payment approval before release.'
+              ? 'Pickup orders still require payment approval before release, and the driver will confirm the pickup location.'
               : `Current delivery zone: ${deliveryZone}. Dispatch only starts after payment approval.`}
           </p>
         </div>
