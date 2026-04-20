@@ -22,6 +22,7 @@ function toFormState(settings: DeliveryConfigSettings | null) {
     outside_i285_fee_cents: String(settings?.outside_i285_fee_cents ?? 2000),
     max_delivery_radius_miles: String(settings?.max_delivery_radius_miles ?? 18),
     delivery_radius_enforced: settings?.delivery_radius_enforced ?? true,
+    delivery_minimum_subtotal_cents: String(settings?.delivery_minimum_subtotal_cents ?? 7500),
     dispatch_offer_timeout_seconds: String(settings?.dispatch_offer_timeout_seconds ?? 90),
     dispatch_auto_escalate: settings?.dispatch_auto_escalate ?? true,
     admin_session_hours: String(settings?.admin_session_hours ?? 12),
@@ -112,6 +113,7 @@ export default function SettingsView({ token, onUnauthorized }: { token: string;
           outside_i285_fee_cents: Number(deliveryForm.outside_i285_fee_cents),
           max_delivery_radius_miles: Number(deliveryForm.max_delivery_radius_miles),
           delivery_radius_enforced: deliveryForm.delivery_radius_enforced,
+          delivery_minimum_subtotal_cents: Number(deliveryForm.delivery_minimum_subtotal_cents),
           dispatch_offer_timeout_seconds: Number(deliveryForm.dispatch_offer_timeout_seconds),
           dispatch_auto_escalate: deliveryForm.dispatch_auto_escalate,
           admin_session_hours: Number(deliveryForm.admin_session_hours),
@@ -144,6 +146,7 @@ export default function SettingsView({ token, onUnauthorized }: { token: string;
           <DetailItem label="BTC Discount" value={`${settings?.btc_discount_percent ?? 0}%`} />
           <DetailItem label="Dispatch Timeout" value={`${deliveryConfig?.dispatch_offer_timeout_seconds ?? 90}s`} />
           <DetailItem label="Atlantic Station Fee" value={formatCurrency(deliveryConfig?.atlantic_station_fee_cents ?? 0)} />
+          <DetailItem label="Delivery Minimum" value={formatCurrency(deliveryConfig?.delivery_minimum_subtotal_cents ?? 0)} />
           <DetailItem label="Max Radius" value={`${deliveryConfig?.max_delivery_radius_miles ?? 0} mi`} />
           <DetailItem label="Radius Enforcement" value={deliveryConfig?.delivery_radius_enforced ? 'Enabled' : 'Disabled'} />
           <DetailItem label="Last Updated" value={formatDateTime(deliveryConfig?.updated_at || settings?.updated_at)} />
@@ -271,6 +274,15 @@ export default function SettingsView({ token, onUnauthorized }: { token: string;
                   step="50"
                   value={deliveryForm.outside_i285_fee_cents}
                   onChange={(event) => setDeliveryForm((current) => ({ ...current, outside_i285_fee_cents: event.target.value }))}
+                />
+              </label>
+              <label className="field">
+                <span>Delivery minimum subtotal (cents)</span>
+                <input
+                  type="number"
+                  step="100"
+                  value={deliveryForm.delivery_minimum_subtotal_cents}
+                  onChange={(event) => setDeliveryForm((current) => ({ ...current, delivery_minimum_subtotal_cents: event.target.value }))}
                 />
               </label>
               <label className="field">

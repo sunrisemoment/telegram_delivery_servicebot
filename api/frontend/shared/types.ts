@@ -18,6 +18,7 @@ export interface AdminSessionSummary {
 export interface InviteSummary {
   id: number;
   code: string;
+  phone?: string | null;
   alias_username?: string | null;
   alias_email?: string | null;
   target_role: MiniAppRole;
@@ -34,6 +35,7 @@ export interface DriverSummary {
   id: number;
   telegram_id: number;
   name: string;
+  phone?: string | null;
   active: boolean;
   is_online: boolean;
   accepts_delivery: boolean;
@@ -102,6 +104,7 @@ export interface CustomerSummary {
   alias_email?: string | null;
   app_role?: MiniAppRole | null;
   account_status?: string | null;
+  verified?: boolean;
   invite_code?: string | null;
   order_count?: number;
   created_at?: string | null;
@@ -208,6 +211,7 @@ export interface AdminMenuItem {
   stock: number;
   active: boolean;
   photo_url?: string | null;
+  photo_urls?: string[];
 }
 
 export interface InventoryReservationSummary {
@@ -257,6 +261,7 @@ export interface DeliveryConfigSettings {
   outside_i285_fee_cents: number;
   max_delivery_radius_miles: number;
   delivery_radius_enforced: boolean;
+  delivery_minimum_subtotal_cents: number;
   dispatch_offer_timeout_seconds: number;
   dispatch_auto_escalate: boolean;
   admin_session_hours: number;
@@ -323,11 +328,14 @@ export interface MiniAppCustomer {
   id: number;
   telegram_id: number;
   phone?: string | null;
+  masked_phone?: string | null;
   display_name?: string | null;
   alias_username?: string | null;
   alias_email?: string | null;
   app_role?: MiniAppRole | null;
   account_status?: string | null;
+  verified_bool?: boolean;
+  phone_verified_at?: string | null;
   invite_code?: string | null;
   last_login_at?: string | null;
   created_at?: string | null;
@@ -363,6 +371,8 @@ export interface MiniAppConfig {
   app_role: MiniAppRole;
   driver_profile?: MiniAppDriverProfile | null;
   btc_discount_percent: number;
+  delivery_minimum_subtotal_cents?: number;
+  phone_verification_required?: boolean;
   contact: {
     welcome_message?: string | null;
     telegram_username?: string | null;
@@ -379,6 +389,7 @@ export interface MenuItem {
   description?: string | null;
   price_cents: number;
   photo_url?: string | null;
+  photo_urls?: string[];
   available_qty: number;
 }
 

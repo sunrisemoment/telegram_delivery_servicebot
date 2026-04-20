@@ -10,6 +10,8 @@ from pathlib import Path
 from .database import SessionLocal, engine, Base, get_db, ensure_runtime_schema
 from . import models, crud, schemas
 from .inventory_service import get_inventory_service
+from .menu_utils import get_menu_item_photo_urls
+from .phone_utils import normalize_phone_number
 from .dispatch_rules import (
     ACTIVE_DRIVER_ORDER_STATUSES,
     driver_can_accept_order,
@@ -56,6 +58,11 @@ class NoCacheHtmlStaticFiles(StaticFiles):
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
         return response
+
+
+def _get_delivery_minimum_subtotal_cents(db: Session) -> int:
+    settings = db.query(models.Settings).first()
+    return int(getattr(settings, "delivery_minimum_subtotal_cents", 7500) or 0)
 
 
 def _resolve_frontend_dir(preferred_dir: Path, fallback_dir: Path) -> Path:
@@ -150,7 +157,8 @@ async def get_menu(db: Session = Depends(get_db)):
                 "category": item.category,
                 "description": item.description,
                 "price_cents": item.price_cents,
-                "photo_url": item.photo_url,
+                "photo_url": get_menu_item_photo_urls(item)[0] if get_menu_item_photo_urls(item) else None,
+                "photo_urls": get_menu_item_photo_urls(item),
                 "stock": item.stock
             }
             for item in menu_items
@@ -230,6 +238,14 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
             delivery_fee_cents = delivery_quote['delivery_fee_cents']
             order_data['delivery_address_text'] = delivery_quote.get('resolved_address') or delivery_address_text
 
+            minimum_delivery_subtotal_cents = _get_delivery_minimum_subtotal_cents(db)
+            if int(order_data['subtotal_cents']) < minimum_delivery_subtotal_cents:
+                minimum_amount = minimum_delivery_subtotal_cents / 100
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Delivery orders require a minimum subtotal of ${minimum_amount:.2f}",
+                )
+
         total_cents = order_data['total_cents']
         logger.info(f"delivery fee sents: {delivery_fee_cents}")
         # Apply BTC discount if applicable
@@ -277,9 +293,12 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
         customer = db.query(models.Customer).filter(models.Customer.telegram_id == telegram_id).first()
 
         if not customer:
+            normalized_phone = normalize_phone_number(order_data.get('phone'))
             customer = models.Customer(
                 telegram_id=telegram_id,
-                phone=order_data.get('phone', '')
+                phone=normalized_phone,
+                verified_bool=bool(normalized_phone),
+                phone_verified_at=datetime.utcnow() if normalized_phone else None,
             )
             db.add(customer)
             db.commit()
@@ -456,7 +475,8 @@ async def get_menu_with_availability(db: Session = Depends(get_db)):
                 "category": item.category,
                 "description": item.description,
                 "price_cents": item.price_cents,
-                "photo_url": item.photo_url,
+                "photo_url": get_menu_item_photo_urls(item)[0] if get_menu_item_photo_urls(item) else None,
+                "photo_urls": get_menu_item_photo_urls(item),
                 "stock": item.stock,
                 "available_qty": available_qty,
                 "status": status
@@ -875,7 +895,8 @@ async def register_driver(driver_data: dict, db: Session = Depends(get_db)):
         accepts_delivery = driver_data.get('accepts_delivery', True)
         accepts_pickup = driver_data.get('accepts_pickup', True)
         max_delivery_distance_miles = driver_data.get('max_delivery_distance_miles', 15.0)
-        max_concurrent_orders = driver_data.get('max_concurrent_orders', 1)
+        max_concurrent_orders = driver_data.get('max_concurrent_orders', 3)
+        normalized_phone = normalize_phone_number(phone) if phone else None
         
         if not telegram_id:
             raise HTTPException(status_code=400, detail="Telegram ID is required")
@@ -890,7 +911,7 @@ async def register_driver(driver_data: dict, db: Session = Depends(get_db)):
             if name:
                 existing_driver.name = name
             if phone is not None:  # Only update phone if provided
-                existing_driver.phone = phone
+                existing_driver.phone = normalized_phone or phone
             existing_driver.active = True
             existing_driver.is_online = is_online
             existing_driver.accepts_delivery = accepts_delivery
@@ -904,7 +925,7 @@ async def register_driver(driver_data: dict, db: Session = Depends(get_db)):
             driver = models.Driver(
                 telegram_id=telegram_id,
                 name=name,
-                phone=phone,
+                phone=normalized_phone or phone,
                 active=True,
                 is_online=is_online,
                 accepts_delivery=accepts_delivery,
@@ -1132,7 +1153,7 @@ async def get_driver_by_telegram_id(telegram_id: int, db: Session = Depends(get_
             "accepts_delivery": getattr(driver, "accepts_delivery", True),
             "accepts_pickup": getattr(driver, "accepts_pickup", True),
             "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
-            "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
+            "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 3) or 3,
             "created_at": driver.created_at.isoformat() if driver.created_at else None
         }
         
@@ -1249,7 +1270,7 @@ async def update_driver_phone(driver_id: int, phone_data: dict, db: Session = De
         if not driver:
             raise HTTPException(status_code=404, detail="Driver not found")
         
-        driver.phone = phone
+        driver.phone = normalize_phone_number(phone) or phone
         db.commit()
         
         return {

@@ -539,6 +539,24 @@ tbody tr.selected-row {
   font-size: 0.74rem;
 }
 
+.table-thumb-stack {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.gallery-count-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(56, 86, 63, 0.1);
+  color: var(--olive);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
 .table-subcopy {
   margin: 6px 0 0;
   color: var(--muted);
@@ -577,6 +595,39 @@ tbody tr.selected-row {
 
 .image-editor {
   align-items: flex-start;
+}
+
+.image-editor-gallery {
+  flex-direction: column;
+}
+
+.gallery-editor-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  width: 100%;
+}
+
+.gallery-editor-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid rgba(22, 20, 16, 0.08);
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.gallery-editor-card .image-preview-shell {
+  width: 100%;
+  min-height: 160px;
+  flex: initial;
+}
+
+.gallery-editor-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .image-preview-shell {

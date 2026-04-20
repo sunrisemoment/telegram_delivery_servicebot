@@ -10,7 +10,9 @@ def get_customer_by_telegram_id(db: Session, telegram_id: int):
 def create_customer(db: Session, customer: schemas.CustomerCreate):
     db_customer = models.Customer(
         telegram_id=customer.telegram_id,
-        phone=customer.phone
+        phone=customer.phone,
+        verified_bool=bool(customer.phone),
+        phone_verified_at=datetime.utcnow() if customer.phone else None,
     )
     db.add(db_customer)
     db.commit()

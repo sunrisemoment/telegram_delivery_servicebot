@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useState } from 'react';
+import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 
 import { extractErrorMessage } from '@shared/api';
@@ -17,6 +17,13 @@ interface MenuFormState {
   active: boolean;
 }
 
+interface EditorPhoto {
+  id: string;
+  url: string;
+  file?: File;
+  persisted: boolean;
+}
+
 function emptyMenuForm(): MenuFormState {
   return {
     category: '',
@@ -28,6 +35,22 @@ function emptyMenuForm(): MenuFormState {
   };
 }
 
+function normalizeItemPhotoUrls(item: AdminMenuItem | null | undefined): string[] {
+  const urls = [...(item?.photo_urls || [])];
+  if (item?.photo_url && !urls.includes(item.photo_url)) {
+    urls.unshift(item.photo_url);
+  }
+  return urls.filter(Boolean);
+}
+
+function toEditorPhotos(photoUrls: string[]): EditorPhoto[] {
+  return photoUrls.map((url, index) => ({
+    id: `persisted-${index}-${url}`,
+    url,
+    persisted: true,
+  }));
+}
+
 export default function MenuManagementView({ token, onUnauthorized }: { token: string; onUnauthorized: () => void }) {
   const [items, setItems] = useState<AdminMenuItem[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
@@ -35,24 +58,27 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [selectedItemId, setSelectedItemId] = useState<number | null>(null);
   const [form, setForm] = useState<MenuFormState>(emptyMenuForm);
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
-  const [photoPreviewUrl, setPhotoPreviewUrl] = useState('');
-  const [savedPhotoUrl, setSavedPhotoUrl] = useState<string | null>(null);
-  const [photoRemoved, setPhotoRemoved] = useState(false);
+  const [photos, setPhotos] = useState<EditorPhoto[]>([]);
+  const [removedSavedPhotoUrls, setRemovedSavedPhotoUrls] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const deferredSearch = useDeferredValue(search);
+  const photoRef = useRef<EditorPhoto[]>([]);
 
   useEffect(() => {
-    if (!photoPreviewUrl.startsWith('blob:')) {
-      return undefined;
-    }
+    photoRef.current = photos;
+  }, [photos]);
 
+  useEffect(() => {
     return () => {
-      URL.revokeObjectURL(photoPreviewUrl);
+      for (const photo of photoRef.current) {
+        if (!photo.persisted && photo.url.startsWith('blob:')) {
+          URL.revokeObjectURL(photo.url);
+        }
+      }
     };
-  }, [photoPreviewUrl]);
+  }, []);
 
   async function loadCatalog() {
     setLoading(true);
@@ -88,15 +114,23 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
   }, [token, statusFilter, deferredSearch]);
 
   function resetEditor() {
+    for (const photo of photos) {
+      if (!photo.persisted && photo.url.startsWith('blob:')) {
+        URL.revokeObjectURL(photo.url);
+      }
+    }
     setSelectedItemId(null);
     setForm(emptyMenuForm());
-    setPhotoFile(null);
-    setPhotoPreviewUrl('');
-    setSavedPhotoUrl(null);
-    setPhotoRemoved(false);
+    setPhotos([]);
+    setRemovedSavedPhotoUrls([]);
   }
 
   function selectItem(item: AdminMenuItem) {
+    for (const photo of photos) {
+      if (!photo.persisted && photo.url.startsWith('blob:')) {
+        URL.revokeObjectURL(photo.url);
+      }
+    }
     setSelectedItemId(item.id);
     setForm({
       category: item.category,
@@ -106,41 +140,52 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
       stock: String(item.stock ?? 0),
       active: item.active,
     });
-    setPhotoFile(null);
-    setSavedPhotoUrl(item.photo_url || null);
-    setPhotoPreviewUrl(item.photo_url || '');
-    setPhotoRemoved(false);
+    setPhotos(toEditorPhotos(normalizeItemPhotoUrls(item)));
+    setRemovedSavedPhotoUrls([]);
   }
 
   function handlePhotoSelection(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) {
+    const nextFiles = Array.from(event.target.files || []);
+    if (!nextFiles.length) {
       return;
     }
 
-    if (!file.type.startsWith('image/')) {
-      setError('Photo must be an image file.');
-      return;
+    const nextPhotos: EditorPhoto[] = [];
+    for (const file of nextFiles) {
+      if (!file.type.startsWith('image/')) {
+        setError('Each photo must be an image file.');
+        return;
+      }
+
+      if (file.size > 5 * 1024 * 1024) {
+        setError('Each photo must be smaller than 5MB.');
+        return;
+      }
+
+      nextPhotos.push({
+        id: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        url: URL.createObjectURL(file),
+        file,
+        persisted: false,
+      });
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      setError('Photo must be smaller than 5MB.');
-      return;
-    }
-
-    const previewUrl = URL.createObjectURL(file);
-    setPhotoFile(file);
-    setPhotoPreviewUrl(previewUrl);
-    setPhotoRemoved(false);
+    setPhotos((current) => [...current, ...nextPhotos]);
     setError('');
+    event.target.value = '';
   }
 
-  function removePhoto() {
-    setPhotoFile(null);
-    setPhotoPreviewUrl('');
-    if (savedPhotoUrl) {
-      setPhotoRemoved(true);
-    }
+  function removePhoto(photoId: string) {
+    setPhotos((current) => {
+      const target = current.find((photo) => photo.id === photoId);
+      if (target?.persisted && target.url) {
+        setRemovedSavedPhotoUrls((existing) => (existing.includes(target.url) ? existing : [...existing, target.url]));
+      }
+      if (target && !target.persisted && target.url.startsWith('blob:')) {
+        URL.revokeObjectURL(target.url);
+      }
+      return current.filter((photo) => photo.id !== photoId);
+    });
   }
 
   async function saveItem(event: FormEvent<HTMLFormElement>) {
@@ -165,16 +210,21 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
     }
 
     setSaving(true);
+    const uploadedPhotoUrls: string[] = [];
     try {
-      let nextPhotoUrl = photoRemoved ? null : savedPhotoUrl;
-
-      if (photoFile) {
-        const uploadResponse = await uploadAdminPhoto(token, photoFile, savedPhotoUrl);
-        nextPhotoUrl = uploadResponse.photo_url;
-      } else if (photoRemoved && savedPhotoUrl) {
-        await deleteAdminPhoto(token, savedPhotoUrl);
-        nextPhotoUrl = null;
+      const uploadedPhotoMap = new Map<string, string>();
+      for (const photo of photos) {
+        if (photo.persisted || !photo.file) {
+          continue;
+        }
+        const uploadResponse = await uploadAdminPhoto(token, photo.file);
+        uploadedPhotoMap.set(photo.id, uploadResponse.photo_url);
+        uploadedPhotoUrls.push(uploadResponse.photo_url);
       }
+
+      const finalPhotoUrls = photos.map((photo) => (
+        photo.persisted ? photo.url : uploadedPhotoMap.get(photo.id) || ''
+      )).filter(Boolean);
 
       const payload = {
         category: form.category.trim(),
@@ -183,7 +233,8 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
         price_cents: Math.round(parsedPrice * 100),
         stock: parsedStock,
         active: form.active,
-        photo_url: nextPhotoUrl,
+        photo_url: finalPhotoUrls[0] || null,
+        photo_urls: finalPhotoUrls,
       };
 
       if (selectedItemId) {
@@ -198,9 +249,20 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
         });
       }
 
+      for (const removedUrl of removedSavedPhotoUrls) {
+        await deleteAdminPhoto(token, removedUrl);
+      }
+
       resetEditor();
       await loadCatalog();
     } catch (cause) {
+      for (const uploadedUrl of uploadedPhotoUrls) {
+        try {
+          await deleteAdminPhoto(token, uploadedUrl);
+        } catch {
+          // Best-effort cleanup for failed saves.
+        }
+      }
       if (isUnauthorizedError(cause)) {
         onUnauthorized();
         return;
@@ -317,69 +379,75 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => (
-                  <tr
-                    key={item.id}
-                    className={selectedItemId === item.id ? 'selected-row' : ''}
-                    onClick={() => selectItem(item)}
-                  >
-                    <td>
-                      {item.photo_url ? (
-                        <img alt={item.name} className="table-thumb" src={item.photo_url} />
-                      ) : (
-                        <div className="thumb-placeholder">No photo</div>
-                      )}
-                    </td>
-                    <td>{item.category || 'Uncategorized'}</td>
-                    <td>
-                      <strong>{item.name}</strong>
-                      {item.description ? <p className="table-subcopy">{item.description}</p> : null}
-                    </td>
-                    <td>{formatCurrency(item.price_cents)}</td>
-                    <td>{item.stock}</td>
-                    <td>
-                      <StatusPill tone={item.active ? 'approved' : 'cancelled'}>
-                        {item.active ? 'Active' : 'Inactive'}
-                      </StatusPill>
-                    </td>
-                    <td>
-                      <div className="row-actions">
-                        <button
-                          className="secondary-button compact-button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            selectItem(item);
-                          }}
-                          type="button"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          className="ghost-button compact-button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void setItemActive(item, !item.active);
-                          }}
-                          type="button"
-                        >
-                          {item.active ? 'Deactivate' : 'Restore'}
-                        </button>
-                        {!item.active ? (
+                {items.map((item) => {
+                  const itemPhotoUrls = normalizeItemPhotoUrls(item);
+                  return (
+                    <tr
+                      key={item.id}
+                      className={selectedItemId === item.id ? 'selected-row' : ''}
+                      onClick={() => selectItem(item)}
+                    >
+                      <td>
+                        {item.photo_url ? (
+                          <div className="table-thumb-stack">
+                            <img alt={item.name} className="table-thumb" src={item.photo_url} />
+                            <span className="gallery-count-pill">{itemPhotoUrls.length}</span>
+                          </div>
+                        ) : (
+                          <div className="thumb-placeholder">No photo</div>
+                        )}
+                      </td>
+                      <td>{item.category || 'Uncategorized'}</td>
+                      <td>
+                        <strong>{item.name}</strong>
+                        {item.description ? <p className="table-subcopy">{item.description}</p> : null}
+                      </td>
+                      <td>{formatCurrency(item.price_cents)}</td>
+                      <td>{item.stock}</td>
+                      <td>
+                        <StatusPill tone={item.active ? 'approved' : 'cancelled'}>
+                          {item.active ? 'Active' : 'Inactive'}
+                        </StatusPill>
+                      </td>
+                      <td>
+                        <div className="row-actions">
                           <button
-                            className="ghost-button compact-button danger-text"
+                            className="secondary-button compact-button"
                             onClick={(event) => {
                               event.stopPropagation();
-                              void permanentlyDeleteItem(item);
+                              selectItem(item);
                             }}
                             type="button"
                           >
-                            Delete Permanently
+                            Edit
                           </button>
-                        ) : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                          <button
+                            className="ghost-button compact-button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void setItemActive(item, !item.active);
+                            }}
+                            type="button"
+                          >
+                            {item.active ? 'Deactivate' : 'Restore'}
+                          </button>
+                          {!item.active ? (
+                            <button
+                              className="ghost-button compact-button danger-text"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void permanentlyDeleteItem(item);
+                              }}
+                              type="button"
+                            >
+                              Delete Permanently
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -464,23 +532,35 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
             <span>Visible for ordering</span>
           </label>
 
-          <div className="image-editor">
-            <div className="image-preview-shell">
-              {photoPreviewUrl ? (
-                <img alt="Menu item preview" className="editor-image-preview" src={photoPreviewUrl} />
-              ) : (
-                <div className="image-placeholder">No image uploaded</div>
-              )}
-            </div>
+          <div className="image-editor image-editor-gallery">
             <div className="stack">
               <label className="field">
-                <span>Photo</span>
-                <input accept="image/*" onChange={handlePhotoSelection} type="file" />
+                <span>Photos</span>
+                <input accept="image/*" multiple onChange={handlePhotoSelection} type="file" />
               </label>
-              {(photoPreviewUrl || savedPhotoUrl) && (
-                <button className="ghost-button compact-button" onClick={removePhoto} type="button">
-                  Remove Photo
-                </button>
+              <p className="muted-copy">Upload multiple product photos. The first photo becomes the primary menu thumbnail.</p>
+            </div>
+            <div className="gallery-editor-grid">
+              {photos.length ? (
+                photos.map((photo, index) => (
+                  <article key={photo.id} className="gallery-editor-card">
+                    <div className="image-preview-shell">
+                      <img
+                        alt={`Menu item photo ${index + 1}`}
+                        className="editor-image-preview"
+                        src={photo.url}
+                      />
+                    </div>
+                    <div className="gallery-editor-meta">
+                      <span className="gallery-count-pill">{index === 0 ? 'Primary' : `Photo ${index + 1}`}</span>
+                      <button className="ghost-button compact-button" onClick={() => removePhoto(photo.id)} type="button">
+                        Remove
+                      </button>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <div className="image-placeholder">No photos uploaded</div>
               )}
             </div>
           </div>

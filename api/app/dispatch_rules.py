@@ -177,7 +177,7 @@ def driver_can_accept_order(
         driver.id,
         exclude_order_id=order.id,
     )
-    max_concurrent_orders = max(getattr(driver, "max_concurrent_orders", 1) or 1, 1)
+    max_concurrent_orders = max(getattr(driver, "max_concurrent_orders", 3) or 3, 1)
     if active_order_count >= max_concurrent_orders:
         return False, f"Driver is already at max concurrent orders ({max_concurrent_orders})"
 

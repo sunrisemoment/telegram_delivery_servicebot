@@ -1,7 +1,9 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
+import hashlib
 import random
+import secrets
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -25,6 +27,7 @@ from .dispatch_service import (
 )
 from .audit_service import log_audit_event
 from .inventory_service import get_inventory_service
+from .menu_utils import get_menu_item_photo_urls
 from .miniapp_auth import (
     build_customer_display_name,
     get_current_miniapp_customer,
@@ -35,11 +38,13 @@ from .miniapp_auth import (
     validate_telegram_init_data,
 )
 from .payment_service import get_payment_service
+from .phone_utils import mask_phone_number, normalize_phone_number, phone_numbers_match
 from .telegram_service import telegram_service
 
 router = APIRouter(prefix="/miniapp-api", tags=["miniapp"])
 
 MAX_PICKUP_UPLOAD_BYTES = 10 * 1024 * 1024
+PHONE_VERIFICATION_CODE_TTL_MINUTES = 10
 BASE_DIR = Path(__file__).resolve().parent.parent
 PICKUP_UPLOAD_DIR = BASE_DIR / "static" / "uploads" / "pickup-arrivals"
 PICKUP_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -51,15 +56,92 @@ def _serialize_customer(customer: models.Customer) -> dict:
         "id": customer.id,
         "telegram_id": customer.telegram_id,
         "phone": customer.phone,
+        "masked_phone": mask_phone_number(customer.phone),
         "display_name": customer.display_name,
         "alias_username": customer.alias_username,
         "alias_email": customer.alias_email,
         "app_role": normalize_app_role(getattr(customer, "app_role", None)) or "customer",
         "account_status": customer.account_status,
+        "verified_bool": bool(customer.verified_bool),
+        "phone_verified_at": customer.phone_verified_at.isoformat() if customer.phone_verified_at else None,
         "invite_code": invite_code,
         "last_login_at": customer.last_login_at.isoformat() if customer.last_login_at else None,
         "created_at": customer.created_at.isoformat() if customer.created_at else None,
     }
+
+
+def _expected_customer_phone(customer: models.Customer) -> str | None:
+    invite_phone = normalize_phone_number(customer.invite.phone) if getattr(customer, "invite", None) else None
+    return invite_phone or normalize_phone_number(customer.phone)
+
+
+def _phone_verification_required(customer: models.Customer) -> bool:
+    expected_phone = _expected_customer_phone(customer)
+    return bool(expected_phone and not getattr(customer, "verified_bool", False))
+
+
+def _set_customer_phone_verification_state(customer: models.Customer) -> None:
+    customer.account_status = "pending_phone_verification" if _phone_verification_required(customer) else "active"
+
+
+def _clear_customer_phone_verification_state(customer: models.Customer, *, verified: bool = False) -> None:
+    customer.verified_bool = verified
+    customer.phone_verified_at = datetime.now(timezone.utc).replace(microsecond=0) if verified else None
+    customer.phone_verification_code_hash = None
+    customer.phone_verification_expires_at = None
+    customer.phone_verification_sent_at = None
+    _set_customer_phone_verification_state(customer)
+
+
+def _bind_customer_phone(customer: models.Customer, expected_phone: str | None) -> None:
+    normalized_expected = normalize_phone_number(expected_phone)
+    current_phone = normalize_phone_number(customer.phone)
+
+    if normalized_expected:
+        if current_phone != normalized_expected:
+            customer.phone = normalized_expected
+            _clear_customer_phone_verification_state(customer, verified=False)
+            return
+        customer.phone = normalized_expected
+    elif current_phone:
+        customer.phone = current_phone
+
+    _set_customer_phone_verification_state(customer)
+
+
+def _require_phone_verified(customer: models.Customer) -> models.Customer:
+    if _phone_verification_required(customer):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "phone_verification_required",
+                "message": "Phone verification is required before using the Mini App",
+            },
+        )
+    return customer
+
+
+def _sync_driver_contact_from_customer(db: Session, customer: models.Customer) -> None:
+    if _resolve_customer_role(customer) != "driver":
+        return
+
+    driver = db.query(models.Driver).filter(models.Driver.telegram_id == customer.telegram_id).first()
+    if not driver:
+        return
+
+    driver.phone = customer.phone
+    db.add(driver)
+
+
+def _issue_phone_verification_code(customer: models.Customer) -> str:
+    code = f"{secrets.randbelow(900000) + 100000}"
+    customer.phone_verification_code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    customer.phone_verification_expires_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=PHONE_VERIFICATION_CODE_TTL_MINUTES)
+    customer.phone_verification_sent_at = datetime.now(timezone.utc).replace(microsecond=0)
+    customer.verified_bool = False
+    customer.phone_verified_at = None
+    _set_customer_phone_verification_state(customer)
+    return code
 
 
 def _serialize_address(address: models.CustomerAddress) -> dict:
@@ -192,6 +274,7 @@ def _resolve_customer_role(customer: models.Customer) -> str:
 
 
 def _require_customer_role(customer: models.Customer) -> models.Customer:
+    _require_phone_verified(customer)
     if _resolve_customer_role(customer) != "customer":
         raise HTTPException(status_code=403, detail="This Mini App account is configured for driver access")
     return customer
@@ -253,7 +336,7 @@ def _ensure_driver_profile(
             accepts_delivery=True,
             accepts_pickup=True,
             max_delivery_distance_miles=15.0,
-            max_concurrent_orders=1,
+            max_concurrent_orders=3,
         )
         db.add(driver)
         db.flush()
@@ -261,7 +344,7 @@ def _ensure_driver_profile(
 
     if display_name:
         driver.name = display_name
-    if customer.phone and not driver.phone:
+    if customer.phone:
         driver.phone = customer.phone
     if driver.active is None:
         driver.active = True
@@ -274,13 +357,14 @@ def _ensure_driver_profile(
     if getattr(driver, "max_delivery_distance_miles", None) is None:
         driver.max_delivery_distance_miles = 15.0
     if getattr(driver, "max_concurrent_orders", None) is None:
-        driver.max_concurrent_orders = 1
+        driver.max_concurrent_orders = 3
     if getattr(driver, "timezone", None) is None:
         driver.timezone = "America/New_York"
     return driver
 
 
 def _get_driver_for_customer(db: Session, customer: models.Customer) -> models.Driver:
+    _require_phone_verified(customer)
     if _resolve_customer_role(customer) != "driver":
         raise HTTPException(status_code=403, detail="This Mini App account is not configured for driver access")
 
@@ -313,7 +397,7 @@ def _serialize_driver_profile(db: Session, driver: models.Driver) -> dict:
         "accepts_delivery": getattr(driver, "accepts_delivery", True),
         "accepts_pickup": getattr(driver, "accepts_pickup", True),
         "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
-        "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
+        "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 3) or 3,
         "timezone": getattr(driver, "timezone", "America/New_York"),
         "working_hours_summary": summarize_driver_working_hours(driver),
         "active_orders": active_orders,
@@ -379,7 +463,8 @@ def _claim_invite_for_customer(
         if invite.claimed_by_customer_id != customer.id:
             raise HTTPException(status_code=409, detail={"code": "invite_claimed", "message": "Invite code has already been claimed"})
         customer.app_role = invite_role
-        customer.account_status = "active"
+        _bind_customer_phone(customer, invite.phone)
+        _sync_driver_contact_from_customer(db, customer)
         return invite
 
     invite.status = "claimed"
@@ -399,7 +484,8 @@ def _claim_invite_for_customer(
         customer.alias_email = normalized_email
     if invite.alias_username and not customer.alias_username:
         customer.alias_username = _ensure_unique_alias_username(db, invite.alias_username, customer.id)
-    customer.account_status = "active"
+    _bind_customer_phone(customer, invite.phone)
+    _sync_driver_contact_from_customer(db, customer)
 
     referral = db.query(models.Referral).filter(models.Referral.invite_id == invite.id).first()
     if referral and not referral.referred_customer_id:
@@ -430,6 +516,11 @@ def _send_admin_order_notification(db: Session, order: models.Order) -> None:
         f"📋 <b>Items:</b>\n{items_text}"
     )
     telegram_service.send_message(contact_settings.telegram_id, message)
+
+
+def _get_delivery_minimum_subtotal_cents(db: Session) -> int:
+    settings = db.query(models.Settings).first()
+    return int(getattr(settings, "delivery_minimum_subtotal_cents", 7500) or 0)
 
 
 def _resolve_delivery_fee(
@@ -500,17 +591,19 @@ async def miniapp_telegram_auth(
     if not customer:
         invite = _find_valid_invite(db, provided_invite_code)
         desired_alias = invite.alias_username or telegram_user.get("username") or f"user_{telegram_id}"
+        invite_phone = normalize_phone_number(invite.phone)
         customer = models.Customer(
             telegram_id=telegram_id,
+            phone=invite_phone,
             display_name=build_customer_display_name(telegram_user),
             alias_username=_ensure_unique_alias_username(db, desired_alias),
             alias_email=invite.alias_email.strip().lower() if invite.alias_email else None,
             app_role=normalize_app_role(invite.target_role) or "customer",
-            account_status="active",
+            account_status="pending_phone_verification" if invite_phone else "active",
+            verified_bool=False,
         )
         db.add(customer)
-        db.commit()
-        db.refresh(customer)
+        db.flush()
         _claim_invite_for_customer(db, invite, customer, telegram_id)
     elif not customer.invite_id:
         if not provided_invite_code:
@@ -519,11 +612,12 @@ async def miniapp_telegram_auth(
         _claim_invite_for_customer(db, invite, customer, telegram_id)
 
     customer.display_name = build_customer_display_name(telegram_user)
-    customer.account_status = "active"
     if telegram_user.get("username") and not customer.alias_username:
         customer.alias_username = _ensure_unique_alias_username(db, telegram_user["username"], customer.id)
+    _bind_customer_phone(customer, _expected_customer_phone(customer))
     if _resolve_customer_role(customer) == "driver":
         _ensure_driver_profile(db, customer, telegram_user)
+        _sync_driver_contact_from_customer(db, customer)
     db.commit()
     db.refresh(customer)
 
@@ -573,14 +667,17 @@ async def miniapp_config(
     settings = db.query(models.Settings).first()
     contact_settings = db.query(models.ContactSettings).first()
     app_role = _resolve_customer_role(customer)
+    phone_verification_required = _phone_verification_required(customer)
     driver_profile = None
-    if app_role == "driver":
+    if app_role == "driver" and not phone_verification_required:
         driver_profile = _serialize_driver_profile(db, _get_driver_for_customer(db, customer))
     return {
         "customer": _serialize_customer(customer),
         "app_role": app_role,
         "driver_profile": driver_profile,
         "btc_discount_percent": settings.btc_discount_percent if settings else 0,
+        "delivery_minimum_subtotal_cents": int(getattr(settings, "delivery_minimum_subtotal_cents", 7500) or 0) if settings else 7500,
+        "phone_verification_required": phone_verification_required,
         "contact": {
             "welcome_message": contact_settings.welcome_message if contact_settings else "Welcome",
             "telegram_username": contact_settings.telegram_username if contact_settings else "",
@@ -606,7 +703,8 @@ async def miniapp_menu(
             "category": item.category,
             "description": item.description,
             "price_cents": item.price_cents,
-            "photo_url": item.photo_url,
+            "photo_url": get_menu_item_photo_urls(item)[0] if get_menu_item_photo_urls(item) else None,
+            "photo_urls": get_menu_item_photo_urls(item),
             "available_qty": inventory_service.get_storefront_availability(item.id),
         }
         for item in menu_items
@@ -751,6 +849,7 @@ async def miniapp_delivery_fee(
         "delivery_fee_cents": delivery_fee_cents,
         "delivery_zone": delivery_zone,
         "delivery_type": fee_request.delivery_or_pickup,
+        "minimum_delivery_subtotal_cents": _get_delivery_minimum_subtotal_cents(db),
         "distance_miles": delivery_quote.get("distance_miles"),
         "origin_name": delivery_quote.get("origin_name"),
         "resolved_address": delivery_quote.get("resolved_address"),
@@ -813,6 +912,14 @@ async def miniapp_create_order(
         delivery_address_id=order_data.delivery_address_id,
         delivery_address_text=order_data.delivery_address_text,
     )
+
+    if delivery_or_pickup == "delivery":
+        minimum_delivery_subtotal_cents = _get_delivery_minimum_subtotal_cents(db)
+        if minimum_delivery_subtotal_cents > 0 and subtotal_cents < minimum_delivery_subtotal_cents:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Delivery orders require a minimum subtotal of ${minimum_delivery_subtotal_cents / 100:.2f}",
+            )
 
     pickup_address_text = order_data.pickup_address_text
     if delivery_or_pickup == "pickup" and order_data.pickup_address_id:
@@ -1031,6 +1138,7 @@ async def miniapp_support_tickets(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_phone_verified(customer)
     tickets = db.query(models.SupportTicket).filter(
         models.SupportTicket.customer_id == customer.id
     ).order_by(models.SupportTicket.created_at.desc()).all()
@@ -1043,6 +1151,7 @@ async def miniapp_create_support_ticket(
     db: Session = Depends(get_db),
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
+    _require_phone_verified(customer)
     role = _resolve_customer_role(customer)
     order = None
     if ticket_data.order_number:
@@ -1115,6 +1224,7 @@ async def miniapp_create_referral(
 
     invite = models.CustomerInvite(
         code=code,
+        phone=normalize_phone_number(referral_data.phone),
         alias_username=referral_data.alias_username,
         alias_email=referral_data.alias_email,
         target_role="customer",
@@ -1147,6 +1257,86 @@ async def miniapp_create_referral(
     return {
         "message": "Referral invite created",
         "referral": _serialize_referral(referral),
+    }
+
+
+@router.post("/phone-verification/request")
+async def miniapp_request_phone_verification(
+    verification_data: schemas.MiniAppPhoneVerificationRequest,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    expected_phone = _expected_customer_phone(customer)
+    if not expected_phone:
+        raise HTTPException(status_code=400, detail="This account does not have a phone number on file")
+
+    submitted_phone = normalize_phone_number(verification_data.phone)
+    if not phone_numbers_match(submitted_phone, expected_phone):
+        raise HTTPException(status_code=400, detail="Enter the same phone number that was assigned to your invite")
+
+    customer.phone = expected_phone
+    code = _issue_phone_verification_code(customer)
+    db.commit()
+    db.refresh(customer)
+
+    if customer.telegram_id:
+        telegram_service.send_message(
+            customer.telegram_id,
+            (
+                "🔐 <b>Phone Verification Code</b>\n\n"
+                f"Use this code in the Mini App within {PHONE_VERIFICATION_CODE_TTL_MINUTES} minutes:\n"
+                f"<code>{code}</code>"
+            ),
+        )
+
+    return {
+        "message": "Verification code sent to your Telegram chat",
+        "masked_phone": mask_phone_number(expected_phone),
+        "expires_in_seconds": PHONE_VERIFICATION_CODE_TTL_MINUTES * 60,
+        "customer": _serialize_customer(customer),
+    }
+
+
+@router.post("/phone-verification/confirm")
+async def miniapp_confirm_phone_verification(
+    verification_data: schemas.MiniAppPhoneVerificationConfirm,
+    db: Session = Depends(get_db),
+    customer: models.Customer = Depends(get_current_miniapp_customer),
+):
+    expected_phone = _expected_customer_phone(customer)
+    if not expected_phone:
+        raise HTTPException(status_code=400, detail="This account does not have a phone number on file")
+    if not customer.phone_verification_code_hash or not customer.phone_verification_expires_at:
+        raise HTTPException(status_code=409, detail="Request a verification code first")
+
+    now = datetime.now(timezone.utc)
+    expires_at = customer.phone_verification_expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        _clear_customer_phone_verification_state(customer, verified=False)
+        db.commit()
+        raise HTTPException(status_code=409, detail="Verification code expired. Request a new code.")
+
+    submitted_hash = hashlib.sha256(verification_data.code.strip().encode("utf-8")).hexdigest()
+    if submitted_hash != customer.phone_verification_code_hash:
+        raise HTTPException(status_code=400, detail="Verification code is invalid")
+
+    customer.phone = expected_phone
+    _clear_customer_phone_verification_state(customer, verified=True)
+    _sync_driver_contact_from_customer(db, customer)
+    db.commit()
+    db.refresh(customer)
+
+    driver_profile = None
+    if _resolve_customer_role(customer) == "driver":
+        driver = _get_driver_for_customer(db, customer)
+        driver_profile = _serialize_driver_profile(db, driver)
+
+    return {
+        "message": "Phone number verified",
+        "customer": _serialize_customer(customer),
+        "driver_profile": driver_profile,
     }
 
 
@@ -1374,6 +1564,13 @@ async def miniapp_update_driver_order_status(
 
     order.status = next_status
     order.updated_at = datetime.now(timezone.utc)
+    dispatch_queue = db.query(models.DispatchQueueEntry).filter(
+        models.DispatchQueueEntry.order_id == order.id,
+    ).first()
+    if dispatch_queue and next_status in {"delivered", "cancelled", "expired"}:
+        dispatch_queue.status = "closed"
+        dispatch_queue.current_offer_id = None
+        dispatch_queue.last_processed_at = datetime.now(timezone.utc)
     db.add(
         models.OrderEvent(
             order_id=order.id,

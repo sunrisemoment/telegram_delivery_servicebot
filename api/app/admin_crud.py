@@ -11,6 +11,7 @@ from .dispatch_rules import (
     normalize_order_status,
 )
 from .dispatch_service import summarize_driver_working_hours
+from .menu_utils import get_menu_item_photo_urls, sync_menu_item_photo_gallery
 
 
 CONFIRMED_PAYMENT_STATUSES = ['paid_0conf', 'paid_confirmed', 'paid']
@@ -126,6 +127,7 @@ def get_all_customers(db: Session, skip: int = 0, limit: int = 100):
             "alias_email": customer.alias_email,
             "app_role": customer.app_role or 'customer',
             "account_status": customer.account_status,
+            "verified": bool(customer.verified_bool),
             "invite_code": customer.invite.code if customer.invite else None,
             "last_login_at": customer.last_login_at.isoformat() if customer.last_login_at else None,
             "order_count": order_count,
@@ -176,12 +178,13 @@ def get_all_drivers(db: Session, skip: int = 0, limit: int = 100):
             "id": driver.id,
             "telegram_id": driver.telegram_id,
             "name": driver.name,
+            "phone": driver.phone,
             "active": driver.active,
             "is_online": getattr(driver, "is_online", True),
             "accepts_delivery": getattr(driver, "accepts_delivery", True),
             "accepts_pickup": getattr(driver, "accepts_pickup", True),
             "max_delivery_distance_miles": getattr(driver, "max_delivery_distance_miles", 15.0),
-            "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 1),
+            "max_concurrent_orders": getattr(driver, "max_concurrent_orders", 3) or 3,
             "timezone": getattr(driver, "timezone", "America/New_York"),
             "working_hours_summary": summarize_driver_working_hours(driver),
             "delivered_orders": delivered_orders,
@@ -251,17 +254,21 @@ def update_order_status(db: Session, order_number: str, status: str, driver_id: 
 
 def create_menu_item(db: Session, menu_data: dict):
     """Create new menu item"""
+    photo_urls = menu_data.get('photo_urls')
+    fallback_photo_url = menu_data.get('photo_url')
     menu_item = models.MenuItem(
         category=menu_data['category'],
         name=menu_data['name'],
         description=menu_data.get('description'),
         price_cents=menu_data['price_cents'],
-        photo_url=menu_data.get('photo_url'),
+        photo_url=fallback_photo_url,
         stock=menu_data.get('stock', 0),
         active=menu_data.get('active', True)
     )
     
     db.add(menu_item)
+    db.flush()
+    sync_menu_item_photo_gallery(db, menu_item, photo_urls, fallback_photo_url=fallback_photo_url)
     db.commit()
     db.refresh(menu_item)
     return menu_item
@@ -272,9 +279,17 @@ def update_menu_item(db: Session, item_id: int, update_data: dict):
     if not menu_item:
         return None
     
+    photo_urls = update_data.pop('photo_urls', None) if 'photo_urls' in update_data else None
+    photo_url_present = 'photo_url' in update_data
+    fallback_photo_url = update_data.get('photo_url') if photo_url_present else menu_item.photo_url
     for field, value in update_data.items():
         if value is not None:
             setattr(menu_item, field, value)
+        elif field == 'photo_url':
+            setattr(menu_item, field, None)
+
+    if photo_urls is not None or photo_url_present:
+        sync_menu_item_photo_gallery(db, menu_item, photo_urls, fallback_photo_url=fallback_photo_url)
     
     db.commit()
     db.refresh(menu_item)
@@ -327,24 +342,49 @@ def assign_order_to_driver(db: Session, order_number: str, driver_id: int):
     if not driver:
         return None
 
+    normalized_status = normalize_order_status(order.status)
+    if normalized_status in {'delivered', 'cancelled', 'expired'}:
+        raise ValueError(f"Order cannot be reassigned after it is {normalized_status}")
+
     ensure_order_ready_for_dispatch(order)
     can_accept, reason = driver_can_accept_order(db, driver, order)
     if not can_accept:
         raise ValueError(reason)
-    
-    # Update order with driver assignment
-    previous_status = order.status
+
+    previous_status = normalized_status or order.status
+    previous_driver = db.query(models.Driver).filter(models.Driver.id == order.driver_id).first() if order.driver_id else None
     order.driver_id = driver_id
     order.status = 'assigned'
+    order.updated_at = datetime.now()
+
+    queue = db.query(models.DispatchQueueEntry).filter(
+        models.DispatchQueueEntry.order_id == order.id
+    ).first()
+    if queue:
+        queue.status = 'assigned'
+        queue.current_offer_id = None
+        queue.last_offered_driver_id = driver_id
+        queue.last_processed_at = datetime.now()
+
+        pending_offers = db.query(models.DriverAssignmentOffer).filter(
+            models.DriverAssignmentOffer.order_id == order.id,
+            models.DriverAssignmentOffer.status == 'pending'
+        ).all()
+        for offer in pending_offers:
+            offer.status = 'cancelled'
+            offer.response_note = 'Order manually reassigned by admin'
+            offer.responded_at = datetime.now()
+            db.add(offer)
     
-    # Create order event
     event = models.OrderEvent(
         order_id=order.id,
-        type="driver_assigned",
+        type="driver_reassigned" if previous_driver and previous_driver.id != driver.id else "driver_assigned",
         payload={
             "driver_id": driver_id,
             "driver_name": driver.name,
-            "previous_status": previous_status
+            "previous_status": previous_status,
+            "previous_driver_id": previous_driver.id if previous_driver else None,
+            "previous_driver_name": previous_driver.name if previous_driver else None,
         }
     )
     db.add(event)
@@ -358,7 +398,8 @@ def assign_order_to_driver(db: Session, order_number: str, driver_id: int):
     return {
         "order": order,
         "driver": driver,
-        "customer": customer
+        "customer": customer,
+        "previous_driver": previous_driver,
     }
 
 def get_settings(db: Session):

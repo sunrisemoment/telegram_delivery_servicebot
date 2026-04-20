@@ -46,6 +46,8 @@ from .dispatch_service import (
     start_dispatch_queue,
 )
 from .miniapp_auth import normalize_app_role
+from .menu_utils import get_menu_item_photo_urls
+from .phone_utils import normalize_phone_number
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,7 @@ def _serialize_invite(invite: models.CustomerInvite) -> dict:
     return {
         "id": invite.id,
         "code": invite.code,
+        "phone": invite.phone,
         "alias_username": invite.alias_username,
         "alias_email": invite.alias_email,
         "target_role": normalize_app_role(invite.target_role) or "customer",
@@ -187,6 +190,7 @@ def _serialize_delivery_settings(settings: models.Settings) -> dict:
         "outside_i285_fee_cents": settings.outside_i285_fee_cents,
         "max_delivery_radius_miles": settings.max_delivery_radius_miles,
         "delivery_radius_enforced": settings.delivery_radius_enforced,
+        "delivery_minimum_subtotal_cents": settings.delivery_minimum_subtotal_cents,
         "dispatch_offer_timeout_seconds": settings.dispatch_offer_timeout_seconds,
         "dispatch_auto_escalate": settings.dispatch_auto_escalate,
         "admin_session_hours": settings.admin_session_hours,
@@ -212,6 +216,29 @@ def _normalize_alias_username(alias_username: str | None) -> str | None:
     normalized = normalized.strip("_")
     normalized = "_".join(part for part in normalized.split("_") if part)
     return normalized or None
+
+
+def _normalize_required_phone(phone: str | None) -> str:
+    normalized = normalize_phone_number(phone)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="A valid phone number is required")
+    return normalized
+
+
+def _serialize_menu_item(item: models.MenuItem) -> dict:
+    photo_urls = get_menu_item_photo_urls(item)
+    return {
+        "id": item.id,
+        "category": item.category,
+        "name": item.name,
+        "description": item.description,
+        "price_cents": item.price_cents,
+        "price": f"${item.price_cents / 100:.2f}",
+        "stock": item.stock,
+        "active": item.active,
+        "photo_url": photo_urls[0] if photo_urls else None,
+        "photo_urls": photo_urls,
+    }
 
 
 def _normalize_invite_target_role(target_role: str | None) -> str:
@@ -413,6 +440,7 @@ async def admin_create_invite(
     """Create a new invite code for Mini App onboarding."""
     del admin
 
+    phone = _normalize_required_phone(invite_data.phone)
     alias_email = invite_data.alias_email.strip().lower() if invite_data.alias_email else None
     alias_username = _normalize_alias_username(invite_data.alias_username)
     target_role = _normalize_invite_target_role(invite_data.target_role)
@@ -439,9 +467,17 @@ async def admin_create_invite(
         if existing_invite_email:
             raise HTTPException(status_code=409, detail="Alias email already exists on an active invite")
 
+    existing_invite_phone = db.query(models.CustomerInvite).filter(
+        models.CustomerInvite.phone == phone,
+        models.CustomerInvite.status != "revoked",
+    ).first()
+    if existing_invite_phone:
+        raise HTTPException(status_code=409, detail="Phone number already exists on an active invite")
+
     admin_customer = _get_or_create_admin_customer(db)
     invite = models.CustomerInvite(
         code=_generate_invite_code(db),
+        phone=phone,
         alias_username=alias_username,
         alias_email=alias_email,
         target_role=target_role,
@@ -490,15 +526,17 @@ async def admin_get_drivers(
 @router.post("/drivers")
 async def create_driver(driver_data: dict, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
     """Create a new driver"""
+    normalized_phone = normalize_phone_number(driver_data.get('phone')) if driver_data.get('phone') else None
     driver = models.Driver(
         telegram_id=driver_data['telegram_id'],
         name=driver_data['name'],
+        phone=normalized_phone,
         active=driver_data.get('active', True),
         is_online=driver_data.get('is_online', True),
         accepts_delivery=driver_data.get('accepts_delivery', True),
         accepts_pickup=driver_data.get('accepts_pickup', True),
         max_delivery_distance_miles=driver_data.get('max_delivery_distance_miles', 15.0),
-        max_concurrent_orders=driver_data.get('max_concurrent_orders', 1),
+        max_concurrent_orders=driver_data.get('max_concurrent_orders', 3),
         timezone=driver_data.get('timezone', 'America/New_York'),
         pickup_address_id=driver_data.get('pickup_address_id')
     )
@@ -515,7 +553,10 @@ async def update_driver(driver_id: int, driver_data: dict, db: Session = Depends
     driver = db.query(models.Driver).filter(models.Driver.id == driver_id).first()
     if not driver:
         raise HTTPException(status_code=404, detail="Driver not found")
-    
+
+    if 'phone' in driver_data and driver_data.get('phone'):
+        driver_data['phone'] = normalize_phone_number(driver_data.get('phone')) or driver_data.get('phone')
+
     for field, value in driver_data.items():
         if hasattr(driver, field) and value is not None:
             setattr(driver, field, value)
@@ -723,20 +764,7 @@ async def get_all_menu_items(
     
     items = query.order_by(models.MenuItem.category, models.MenuItem.name).all()
     
-    return [
-        {
-            "id": item.id,
-            "category": item.category,
-            "name": item.name,
-            "description": item.description,
-            "price_cents": item.price_cents,
-            "price": f"${item.price_cents / 100:.2f}",
-            "stock": item.stock,
-            "active": item.active,
-            "photo_url": item.photo_url
-        }
-        for item in items
-    ]
+    return [_serialize_menu_item(item) for item in items]
 
 @router.post("/upload-photo")
 async def upload_photo(
@@ -792,6 +820,11 @@ async def remove_old_photo(photo_url: str):
         print(f"❌ Error removing old photo: {e}")
         # Don't raise error - we don't want to fail the upload if deletion fails
 
+
+async def remove_photo_gallery(photo_urls: list[str]):
+    for photo_url in photo_urls:
+        await remove_old_photo(photo_url)
+
 @router.delete("/delete-photo")
 async def delete_photo(photo_url: str, admin: str = Depends(get_current_admin)):
     """Delete a photo from server"""
@@ -841,6 +874,7 @@ async def get_available_drivers(order_number: str, db: Session = Depends(get_db)
             "id": driver.id,
             "name": driver.name,
             "telegram_id": driver.telegram_id,
+            "phone": driver.phone,
             "active_orders": active_order_count,
             "already_assigned": driver.id == order.driver_id,
             "is_online": driver.is_online,
@@ -881,7 +915,9 @@ async def assign_driver_to_order(
     if not assignment_result:
         raise HTTPException(status_code=404, detail="Order or driver not found")
     
-    # Send notification to driver
+    previous_driver = assignment_result.get("previous_driver")
+    reassigned = bool(previous_driver and previous_driver.id != assignment_result["driver"].id)
+
     driver_notification_sent = False
     driver = assignment_result["driver"]
     order = assignment_result["order"]
@@ -899,8 +935,18 @@ async def assign_driver_to_order(
             logger.error(f"❌ Failed to send driver notification to {driver.name}")
     else:
         logger.warning(f"Driver {driver.name} has no Telegram ID, cannot send notification")
+
+    previous_driver_notification_sent = False
+    if reassigned and previous_driver and previous_driver.telegram_id:
+        previous_driver_notification_sent = telegram_service.send_message(
+            previous_driver.telegram_id,
+            (
+                "🔁 <b>Order Reassigned</b>\n\n"
+                f"📦 <b>Order #:</b> <code>{order.order_number}</code>\n"
+                "Dispatch moved this order to another driver."
+            ),
+        )
     
-    # Send notification to customer with pickup address if it's a pickup order
     customer_notification_sent = False
     customer = assignment_result["customer"]
     
@@ -940,16 +986,22 @@ async def assign_driver_to_order(
     
     # Create response with detailed notification status
     response_data = {
-        "message": "Driver assigned successfully",
+        "message": "Driver reassigned successfully" if reassigned else "Driver assigned successfully",
         "order_number": order_number,
         "driver_assigned": driver.name,
         "driver_telegram_id": driver.telegram_id,
+        "previous_driver_name": previous_driver.name if previous_driver else None,
         "pickup_address_provided": bool(driver.pickup_address_id and order.delivery_or_pickup == 'pickup'),
         "notifications": {
             "driver": {
                 "sent": driver_notification_sent,
                 "telegram_id": driver.telegram_id,
                 "driver_name": driver.name
+            },
+            "previous_driver": {
+                "sent": previous_driver_notification_sent,
+                "telegram_id": previous_driver.telegram_id if previous_driver else None,
+                "driver_name": previous_driver.name if previous_driver else None,
             },
             "customer": {
                 "sent": customer_notification_sent,
@@ -1448,6 +1500,11 @@ async def force_delete_menu_item(
             models.DriverStockEvent.menu_item_id == item_id
         ).delete()
         
+        await remove_photo_gallery(get_menu_item_photo_urls(menu_item))
+        db.query(models.MenuItemPhoto).filter(
+            models.MenuItemPhoto.menu_item_id == item_id
+        ).delete(synchronize_session=False)
+
         # Finally delete the menu item
         db.delete(menu_item)
         db.commit()
@@ -1797,6 +1854,11 @@ async def permanently_delete_menu_item_universal(
             detail=f"Cannot delete menu item. It has references: {inventory_references} reservations, {driver_stock_references} stock records, {driver_event_references} events."
         )
     
+    await remove_photo_gallery(get_menu_item_photo_urls(menu_item))
+    db.query(models.MenuItemPhoto).filter(
+        models.MenuItemPhoto.menu_item_id == item_id
+    ).delete(synchronize_session=False)
+
     # Delete the item
     db.delete(menu_item)
     db.commit()

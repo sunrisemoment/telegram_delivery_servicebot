@@ -53,6 +53,7 @@ interface DeliveryFeeResponse {
   delivery_fee_cents: number;
   delivery_zone: string;
   delivery_type: string;
+  minimum_delivery_subtotal_cents?: number;
 }
 
 interface CreateOrderResponse {
@@ -279,6 +280,10 @@ function App() {
   const [driverDeliveryTimeOrderNumber, setDriverDeliveryTimeOrderNumber] = useState('');
   const [pickupEtaOrderNumber, setPickupEtaOrderNumber] = useState('');
   const [pickupPhotoOrderNumber, setPickupPhotoOrderNumber] = useState('');
+  const [verificationPhone, setVerificationPhone] = useState('');
+  const [verificationCode, setVerificationCode] = useState('');
+  const [verificationBusy, setVerificationBusy] = useState(false);
+  const [verificationCodeSent, setVerificationCodeSent] = useState(false);
   const [activeView, setActiveView] = useState<ViewKey>('home');
   const [authStatus, setAuthStatus] = useState('Waiting for Telegram Mini App context.');
   const [authTone, setAuthTone] = useState<AuthTone>('default');
@@ -324,6 +329,11 @@ function App() {
   const pendingApprovalCount = orders.filter((order) => !order.payment_confirmed && order.status !== 'cancelled').length;
   const supportText = buildSupportText(config);
   const authenticated = Boolean(sessionToken && customer && config);
+  const verificationRequired = Boolean(
+    authenticated
+      && (config?.phone_verification_required || (customer?.phone && !customer?.verified_bool)),
+  );
+  const minimumDeliverySubtotalCents = Number(config?.delivery_minimum_subtotal_cents ?? 0);
 
   function pushToast(message: string, tone: ToastTone = 'default') {
     setToast({ message, tone });
@@ -342,6 +352,9 @@ function App() {
     setDriverOffers([]);
     setDeliveryFeeCents(0);
     setDeliveryZone('Awaiting address');
+    setVerificationPhone('');
+    setVerificationCode('');
+    setVerificationCodeSent(false);
     setActiveView('home');
     clearStoredSessionToken();
     if (nextAuthMessage) {
@@ -357,6 +370,30 @@ function App() {
     try {
       const configResponse = await miniappRequest<MiniAppConfig>(token, '/config');
       const nextRole: MiniAppRole = configResponse.app_role || configResponse.customer.app_role || 'customer';
+      const requiresPhoneVerification = Boolean(
+        configResponse.phone_verification_required
+          || (configResponse.customer.phone && !configResponse.customer.verified_bool),
+      );
+      setConfig(configResponse);
+      setCustomer(configResponse.customer);
+      setVerificationPhone(configResponse.customer.phone || '');
+
+      if (requiresPhoneVerification) {
+        setVerificationCode('');
+        setVerificationCodeSent(false);
+        setOrders([]);
+        setMenu([]);
+        setAddresses([]);
+        setPickupLocations([]);
+        setSupportTickets([]);
+        setReferrals([]);
+        setDriverOffers([]);
+        setCart([]);
+        setDeliveryFeeCents(0);
+        setDeliveryZone('Verification required');
+        return;
+      }
+
       const [ordersResponse, menuResponse, addressesResponse, pickupResponse, supportResponse, referralsResponse, offersResponse] =
         await Promise.all([
           miniappRequest<MiniAppOrder[]>(token, '/orders'),
@@ -373,8 +410,6 @@ function App() {
             ? miniappRequest<MiniAppDriverOffer[]>(token, '/driver/offers')
             : Promise.resolve<MiniAppDriverOffer[]>([]),
         ]);
-      setConfig(configResponse);
-      setCustomer(configResponse.customer);
       setOrders(Array.isArray(ordersResponse) ? ordersResponse : []);
       setSupportTickets(Array.isArray(supportResponse) ? supportResponse : []);
       if (nextRole === 'customer') {
@@ -422,6 +457,7 @@ function App() {
     await loadAppData(authResponse.session_token);
     setSessionToken(authResponse.session_token);
     setCustomer(authResponse.customer);
+    setVerificationPhone(authResponse.customer.phone || '');
     setAuthStatus('Mini App access is active.');
     setAuthTone('default');
   }
@@ -434,6 +470,7 @@ function App() {
       const configResponse = await miniappRequest<MiniAppConfig>(token, '/config');
       setConfig(configResponse);
       setCustomer(configResponse.customer);
+      setVerificationPhone(configResponse.customer.phone || '');
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
@@ -536,6 +573,100 @@ function App() {
         return;
       }
       pushToast(extractErrorMessage(cause), 'error');
+    }
+  }
+
+  async function requestPhoneVerification() {
+    if (!sessionToken) {
+      return;
+    }
+
+    setVerificationBusy(true);
+    try {
+      const response = await miniappRequest<{
+        message: string;
+        masked_phone?: string | null;
+        expires_in_seconds: number;
+        customer: MiniAppCustomer;
+      }>(sessionToken, '/phone-verification/request', {
+        method: 'POST',
+        body: JSON.stringify({
+          phone: verificationPhone,
+        }),
+      });
+      setCustomer(response.customer);
+      setConfig((current) => (
+        current
+          ? { ...current, customer: response.customer, phone_verification_required: true }
+          : current
+      ));
+      setVerificationCode('');
+      setVerificationCodeSent(true);
+      setAuthStatus(response.message || 'Verification code sent.');
+      setAuthTone('default');
+      pushToast(response.message || 'Verification code sent');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      setAuthStatus(extractErrorMessage(cause));
+      setAuthTone('error');
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setVerificationBusy(false);
+    }
+  }
+
+  async function confirmPhoneVerification(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!sessionToken) {
+      return;
+    }
+
+    setVerificationBusy(true);
+    try {
+      const response = await miniappRequest<{
+        message: string;
+        customer: MiniAppCustomer;
+        driver_profile?: MiniAppDriverProfile | null;
+      }>(sessionToken, '/phone-verification/confirm', {
+        method: 'POST',
+        body: JSON.stringify({
+          code: verificationCode,
+        }),
+      });
+      setVerificationCode('');
+      setVerificationCodeSent(false);
+      setCustomer(response.customer);
+      setConfig((current) => (
+        current
+          ? {
+            ...current,
+            customer: response.customer,
+            driver_profile: response.driver_profile ?? current.driver_profile,
+            phone_verification_required: false,
+          }
+          : current
+      ));
+      setAuthStatus(response.message || 'Phone number verified.');
+      setAuthTone('default');
+      await loadAppData(sessionToken);
+      pushToast(response.message || 'Phone verified');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('success');
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) {
+        resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
+        return;
+      }
+      setAuthStatus(extractErrorMessage(cause));
+      setAuthTone('error');
+      pushToast(extractErrorMessage(cause), 'error');
+      getTelegramApp()?.HapticFeedback?.notificationOccurred?.('error');
+    } finally {
+      setVerificationBusy(false);
     }
   }
 
@@ -940,6 +1071,14 @@ function App() {
       return;
     }
 
+    if (deliveryMode === 'delivery' && minimumDeliverySubtotalCents > 0 && subtotalCents < minimumDeliverySubtotalCents) {
+      pushToast(
+        `Delivery orders require a minimum subtotal of ${formatCurrency(minimumDeliverySubtotalCents)}.`,
+        'error',
+      );
+      return;
+    }
+
     setPlacingOrder(true);
     try {
       const response = await miniappRequest<CreateOrderResponse>(sessionToken, '/orders', {
@@ -1024,6 +1163,12 @@ function App() {
       document.body.classList.remove('miniapp-driver-theme');
     };
   }, [isDriverApp]);
+
+  useEffect(() => {
+    if (customer?.phone) {
+      setVerificationPhone(customer.phone);
+    }
+  }, [customer?.phone]);
 
   useEffect(() => {
     if (isDriverApp && activeView === 'menu') {
@@ -1228,6 +1373,22 @@ function App() {
           <h2>Checking Telegram session</h2>
           <p>Verifying your Mini App session and loading the current workspace.</p>
         </article>
+      ) : authenticated && verificationRequired ? (
+        <PhoneVerificationView
+          phone={verificationPhone}
+          maskedPhone={customer?.masked_phone || customer?.phone || ''}
+          code={verificationCode}
+          busy={verificationBusy}
+          codeSent={verificationCodeSent}
+          statusMessage={authStatus}
+          statusTone={authTone}
+          supportText={supportText}
+          onPhoneChange={setVerificationPhone}
+          onCodeChange={setVerificationCode}
+          onRequestCode={() => void requestPhoneVerification()}
+          onSubmit={confirmPhoneVerification}
+          onLogout={() => void logout()}
+        />
       ) : authenticated ? (
         <div className={`miniapp-layout ${isDriverApp ? 'driver-layout' : ''}`}>
           <main className="content-column">
@@ -1331,6 +1492,7 @@ function App() {
                 subtotalCents={subtotalCents}
                 totalCents={totalCents}
                 deliveryFeeCents={deliveryMode === 'pickup' ? 0 : deliveryFeeCents}
+                minimumDeliverySubtotalCents={minimumDeliverySubtotalCents}
                 deliveryZone={deliveryZone}
                 deliveryMode={deliveryMode}
                 deliveryAddressId={deliveryAddressId}
@@ -1376,6 +1538,92 @@ function App() {
 
       {toast ? <div className={`toast ${toast.tone}`}>{toast.message}</div> : null}
     </div>
+  );
+}
+
+function PhoneVerificationView({
+  phone,
+  maskedPhone,
+  code,
+  busy,
+  codeSent,
+  statusMessage,
+  statusTone,
+  supportText,
+  onPhoneChange,
+  onCodeChange,
+  onRequestCode,
+  onSubmit,
+  onLogout,
+}: {
+  phone: string;
+  maskedPhone: string;
+  code: string;
+  busy: boolean;
+  codeSent: boolean;
+  statusMessage: string;
+  statusTone: AuthTone;
+  supportText: string;
+  onPhoneChange: (value: string) => void;
+  onCodeChange: (value: string) => void;
+  onRequestCode: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
+  onLogout: () => void;
+}) {
+  return (
+    <article className="surface auth-surface verification-surface">
+      <p className="eyebrow">Phone Verification</p>
+      <h2>Confirm the phone number on your private invite</h2>
+      <p className="muted-copy">
+        Enter the phone number assigned to your invite. The Mini App will send a six-digit verification code to your Telegram chat before unlocking the rest of the workspace.
+      </p>
+
+      <label className="field">
+        <span>Assigned phone number</span>
+        <input
+          value={phone}
+          onChange={(event) => onPhoneChange(event.target.value)}
+          placeholder="+1 404 555 0101"
+        />
+      </label>
+
+      <div className="summary-box verification-summary">
+        <div>
+          <span>Invite phone</span>
+          <strong>{maskedPhone || 'On file'}</strong>
+        </div>
+        <p className="helper-text">
+          If this looks wrong, contact support before continuing. {supportText}
+        </p>
+      </div>
+
+      <div className="row-actions">
+        <button className="primary-button" disabled={busy || !phone.trim()} onClick={onRequestCode} type="button">
+          {busy ? 'Sending…' : codeSent ? 'Resend Code' : 'Send Verification Code'}
+        </button>
+        <button className="ghost-button" onClick={onLogout} type="button">
+          Logout
+        </button>
+      </div>
+
+      <div className={`inline-banner ${statusTone === 'error' ? 'error' : ''}`}>{statusMessage}</div>
+
+      <form className="stack" onSubmit={onSubmit}>
+        <label className="field">
+          <span>Verification code</span>
+          <input
+            inputMode="numeric"
+            maxLength={8}
+            value={code}
+            onChange={(event) => onCodeChange(event.target.value.replace(/\s+/g, ''))}
+            placeholder="Enter 6-digit code"
+          />
+        </label>
+        <button className="secondary-button" disabled={busy || !code.trim()} type="submit">
+          {busy ? 'Verifying…' : 'Verify Phone'}
+        </button>
+      </form>
+    </article>
   );
 }
 
@@ -1484,6 +1732,8 @@ function HomeView({
             <dl className="detail-grid">
               <DetailItem label="Invite" value={customer?.invite_code || 'Pending'} />
               <DetailItem label="Status" value={driverProfile?.is_online ? 'Online' : 'Offline'} />
+              <DetailItem label="Phone" value={customer?.phone || driverProfile?.phone || 'Not provided'} />
+              <DetailItem label="Verified" value={customer?.verified_bool ? 'Yes' : 'Pending'} />
               <DetailItem
                 label="Modes"
                 value={[
@@ -1508,7 +1758,7 @@ function HomeView({
             <StatTile label="Delivered" value={`${driverProfile?.delivered_orders || 0}`} tone="olive" />
             <StatTile
               label="Capacity"
-              value={`${driverProfile?.active_orders || 0}/${driverProfile?.max_concurrent_orders || 1}`}
+              value={`${driverProfile?.active_orders || 0}/${driverProfile?.max_concurrent_orders || 3}`}
               tone="warning"
             />
           </article>
@@ -1971,6 +2221,26 @@ function MenuView({
                       <span className="chip">{category}</span>
                       <span className="badge">{item.available_qty} available</span>
                     </div>
+                    {item.photo_url ? (
+                      <div className="menu-item-media">
+                        <img alt={item.name} className="menu-item-image" src={item.photo_url} />
+                        {item.photo_urls && item.photo_urls.length > 1 ? (
+                          <span className="menu-photo-count">{item.photo_urls.length} photos</span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {item.photo_urls && item.photo_urls.length > 1 ? (
+                      <div className="menu-photo-strip">
+                        {item.photo_urls.slice(0, 4).map((photoUrl, index) => (
+                          <img
+                            key={`${item.id}-photo-${index}`}
+                            alt={`${item.name} preview ${index + 1}`}
+                            className="menu-photo-thumb"
+                            src={photoUrl}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="menu-item-copy">
                       <h4>{item.name}</h4>
                       <p>{item.description || 'No description provided yet.'}</p>
@@ -2573,12 +2843,14 @@ function AccountView({
               Logout
             </button>
           </div>
-          <dl className="detail-grid">
-            <DetailItem label="Invite" value={customer?.invite_code || 'Pending'} />
-            <DetailItem label="Role" value={humanize(appRole)} />
-            <DetailItem label="Status" value={driverProfile?.is_online ? 'Online' : 'Offline'} />
-            <DetailItem label="Last Login" value={formatDateTime(customer?.last_login_at)} />
-          </dl>
+        <dl className="detail-grid">
+          <DetailItem label="Invite" value={customer?.invite_code || 'Pending'} />
+          <DetailItem label="Role" value={humanize(appRole)} />
+          <DetailItem label="Status" value={driverProfile?.is_online ? 'Online' : 'Offline'} />
+          <DetailItem label="Phone" value={customer?.phone || driverProfile?.phone || 'Not provided'} />
+          <DetailItem label="Verified" value={customer?.verified_bool ? 'Yes' : 'Pending'} />
+          <DetailItem label="Last Login" value={formatDateTime(customer?.last_login_at)} />
+        </dl>
         </article>
 
         <div className="feature-grid account-grid">
@@ -2618,7 +2890,7 @@ function AccountView({
             </div>
 
             <dl className="detail-grid">
-              <DetailItem label="Capacity" value={`${driverProfile?.max_concurrent_orders || 1} active orders`} />
+              <DetailItem label="Capacity" value={`${driverProfile?.max_concurrent_orders || 3} active orders`} />
               <DetailItem label="Range" value={`${driverProfile?.max_delivery_distance_miles || 15} mi`} />
               <DetailItem
                 label="Pickup Hub"
@@ -2657,6 +2929,8 @@ function AccountView({
         <dl className="detail-grid">
           <DetailItem label="Invite" value={customer?.invite_code || 'Pending'} />
           <DetailItem label="Status" value={humanize(customer?.account_status || 'active')} />
+          <DetailItem label="Phone" value={customer?.phone || 'Not provided'} />
+          <DetailItem label="Verified" value={customer?.verified_bool ? 'Yes' : 'Pending'} />
           <DetailItem
             label="Alias"
             value={customer?.alias_username || customer?.alias_email || customer?.display_name || 'Not set'}
@@ -2749,6 +3023,7 @@ function CartView({
   subtotalCents,
   totalCents,
   deliveryFeeCents,
+  minimumDeliverySubtotalCents,
   deliveryZone,
   deliveryMode,
   deliveryAddressId,
@@ -2772,6 +3047,7 @@ function CartView({
   subtotalCents: number;
   totalCents: number;
   deliveryFeeCents: number;
+  minimumDeliverySubtotalCents: number;
   deliveryZone: string;
   deliveryMode: DeliveryMode;
   deliveryAddressId: string;
@@ -2791,6 +3067,11 @@ function CartView({
   onClearCart: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => Promise<void>;
 }) {
+  const belowDeliveryMinimum =
+    deliveryMode === 'delivery'
+    && minimumDeliverySubtotalCents > 0
+    && subtotalCents < minimumDeliverySubtotalCents;
+
   return (
     <article className="surface cart-panel">
       <div className="section-head compact">
@@ -2936,9 +3217,14 @@ function CartView({
               ? 'Pickup orders still require payment approval before release, and the driver will confirm the pickup location.'
               : `Current delivery zone: ${deliveryZone}. Dispatch only starts after payment approval.`}
           </p>
+          {deliveryMode === 'delivery' && minimumDeliverySubtotalCents > 0 ? (
+            <p className={`helper-text ${belowDeliveryMinimum ? 'warning-copy' : ''}`}>
+              Delivery minimum subtotal: {formatCurrency(minimumDeliverySubtotalCents)}.
+            </p>
+          ) : null}
         </div>
 
-        <button className="primary-button" disabled={placingOrder || !cart.length} type="submit">
+        <button className="primary-button" disabled={placingOrder || !cart.length || belowDeliveryMinimum} type="submit">
           {placingOrder ? 'Placing Order…' : 'Place Order'}
         </button>
       </form>

@@ -19,6 +19,10 @@ class Customer(Base):
     account_status = Column(String(20), default="active")
     invite_id = Column(BigInteger, ForeignKey("customer_invites.id"))
     verified_bool = Column(Boolean, default=False)
+    phone_verified_at = Column(DateTime(timezone=True))
+    phone_verification_code_hash = Column(String(64))
+    phone_verification_expires_at = Column(DateTime(timezone=True))
+    phone_verification_sent_at = Column(DateTime(timezone=True))
     default_address_id = Column(BigInteger)
     last_login_at = Column(DateTime(timezone=True))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -33,6 +37,7 @@ class CustomerInvite(Base):
     code = Column(String(32), unique=True, nullable=False, index=True)
     alias_username = Column(String(100))
     alias_email = Column(String(200))
+    phone = Column(String(32))
     target_role = Column(String(20), default="customer")
     notes = Column(Text)
     status = Column(String(20), default="pending")
@@ -75,7 +80,7 @@ class Driver(Base):
     accepts_delivery = Column(Boolean, default=True)
     accepts_pickup = Column(Boolean, default=True)
     max_delivery_distance_miles = Column(Float, default=15.0)
-    max_concurrent_orders = Column(Integer, default=1)
+    max_concurrent_orders = Column(Integer, default=3)
     timezone = Column(String(64), default="America/New_York")
     pickup_address_id = Column(BigInteger, ForeignKey("pickup_addresses.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -93,6 +98,18 @@ class MenuItem(Base):
     photo_url = Column(Text)
     stock = Column(Integer, default=0)
     active = Column(Boolean, default=True)
+
+
+class MenuItemPhoto(Base):
+    __tablename__ = "menu_item_photos"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    menu_item_id = Column(BigInteger, ForeignKey("menu_items.id"), nullable=False, index=True)
+    photo_url = Column(Text, nullable=False)
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    menu_item = relationship("MenuItem", foreign_keys=[menu_item_id], backref="photos")
 
 class Order(Base):
     __tablename__ = "orders"
@@ -426,6 +443,7 @@ class Settings(Base):
     outside_i285_fee_cents = Column(Integer, default=2000)
     max_delivery_radius_miles = Column(Float, default=18.0)
     delivery_radius_enforced = Column(Boolean, default=True)
+    delivery_minimum_subtotal_cents = Column(Integer, default=7500)
     dispatch_offer_timeout_seconds = Column(Integer, default=90)
     dispatch_auto_escalate = Column(Boolean, default=True)
     admin_session_hours = Column(Integer, default=12)

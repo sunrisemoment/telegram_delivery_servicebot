@@ -204,6 +204,10 @@ button {
   gap: 16px;
 }
 
+.verification-surface {
+  max-width: 760px;
+}
+
 .tabbar {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -365,6 +369,11 @@ button {
   color: var(--accent-strong);
 }
 
+.warning-copy {
+  color: var(--warning);
+  font-weight: 700;
+}
+
 .search-input,
 input,
 select,
@@ -413,6 +422,52 @@ textarea {
 .menu-item-card {
   display: grid;
   gap: 14px;
+}
+
+.menu-item-media {
+  position: relative;
+  overflow: hidden;
+  border-radius: 22px;
+  border: 1px solid rgba(30, 25, 18, 0.08);
+  min-height: 200px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.menu-item-image {
+  width: 100%;
+  height: 100%;
+  min-height: 200px;
+  object-fit: cover;
+  display: block;
+}
+
+.menu-photo-count {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(24, 32, 22, 0.72);
+  color: #f7f5ea;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.menu-photo-strip {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.menu-photo-thumb {
+  width: 68px;
+  height: 68px;
+  border-radius: 18px;
+  object-fit: cover;
+  border: 1px solid rgba(30, 25, 18, 0.08);
+  background: rgba(255, 255, 255, 0.66);
+  flex: 0 0 auto;
 }
 
 .chip,

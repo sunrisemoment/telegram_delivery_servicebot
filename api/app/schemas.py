@@ -25,6 +25,7 @@ class MenuItemBase(BaseModel):
 class MenuItem(MenuItemBase):
     id: int
     photo_url: Optional[str] = None
+    photo_urls: List[str] = Field(default_factory=list)
     stock: int
     active: bool
 
@@ -77,6 +78,7 @@ class AdminLoginRequest(BaseModel):
 
 
 class CustomerInviteCreate(BaseModel):
+    phone: str
     alias_username: Optional[str] = None
     alias_email: Optional[str] = None
     target_role: Optional[str] = "customer"
@@ -130,6 +132,14 @@ class MiniAppDriverPickupLocationUpdate(BaseModel):
     pickup_address_id: int
 
 
+class MiniAppPhoneVerificationRequest(BaseModel):
+    phone: str
+
+
+class MiniAppPhoneVerificationConfirm(BaseModel):
+    code: str = Field(..., min_length=4, max_length=8)
+
+
 class MiniAppPickupEtaUpdateCreate(BaseModel):
     eta_minutes: int = Field(..., ge=1, le=240)
     note: Optional[str] = None
@@ -148,6 +158,7 @@ class DeliveryConfigUpdate(BaseModel):
     outside_i285_fee_cents: Optional[int] = Field(default=None, ge=0)
     max_delivery_radius_miles: Optional[float] = Field(default=None, ge=0)
     delivery_radius_enforced: Optional[bool] = None
+    delivery_minimum_subtotal_cents: Optional[int] = Field(default=None, ge=0)
     dispatch_offer_timeout_seconds: Optional[int] = Field(default=None, ge=15, le=3600)
     dispatch_auto_escalate: Optional[bool] = None
     admin_session_hours: Optional[int] = Field(default=None, ge=1, le=168)
@@ -186,6 +197,7 @@ class AdminSupportTicketUpdate(BaseModel):
 
 
 class MiniAppReferralCreate(BaseModel):
+    phone: Optional[str] = None
     alias_username: Optional[str] = None
     alias_email: Optional[str] = None
     notes: Optional[str] = None

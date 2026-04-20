@@ -733,18 +733,18 @@ function OrdersView({ token, onUnauthorized }: { token: string; onUnauthorized: 
                   {dispatching ? 'Processing Queue…' : 'Start Offer Queue'}
                 </button>
                 <label className="field">
-                  <span>Assign Driver</span>
+                  <span>{selectedOrder?.driver ? 'Reassign Driver' : 'Assign Driver'}</span>
                   <select value={selectedDriverId} onChange={(event) => setSelectedDriverId(event.target.value)}>
                     <option value="">Select driver</option>
                     {drivers.map((driver) => (
                       <option key={driver.id} value={driver.id}>
-                        {driver.name} • {driver.active_orders} active • {driver.is_online ? 'online' : 'offline'}
+                        {driver.name} • {driver.active_orders}/{driver.max_concurrent_orders} active • {driver.is_online ? 'online' : 'offline'}
                       </option>
                     ))}
                   </select>
                 </label>
                 <button className="primary-button" disabled={!selectedDriverId} onClick={() => void assignDriver()}>
-                  Assign Driver
+                  {selectedOrder?.driver ? 'Reassign Driver' : 'Assign Driver'}
                 </button>
               </div>
             )}
@@ -915,6 +915,7 @@ function DriversView({ token, onUnauthorized }: { token: string; onUnauthorized:
               <dl className="detail-grid">
                 <DetailItem label="Active Orders" value={`${driver.active_orders}`} />
                 <DetailItem label="Delivered" value={`${driver.delivered_orders}`} />
+                <DetailItem label="Phone" value={driver.phone || 'Not provided'} />
                 <DetailItem label="Max Distance" value={`${driver.max_delivery_distance_miles} mi`} />
                 <DetailItem label="Capacity" value={`${driver.max_concurrent_orders}`} />
                 <DetailItem label="Timezone" value={driver.timezone || 'America/New_York'} />
@@ -952,6 +953,7 @@ function DriversView({ token, onUnauthorized }: { token: string; onUnauthorized:
 
             <dl className="detail-grid">
               <DetailItem label="Telegram" value={`${selectedDriver.telegram_id}`} />
+              <DetailItem label="Phone" value={selectedDriver.phone || 'Not provided'} />
               <DetailItem label="Pickup Hub" value={selectedDriver.pickup_address?.name || 'Unassigned'} />
               <DetailItem label="Range" value={`${selectedDriver.max_delivery_distance_miles} mi`} />
               <DetailItem label="Capacity" value={`${selectedDriver.max_concurrent_orders}`} />
@@ -1081,7 +1083,7 @@ function CustomersView({ token, onUnauthorized }: { token: string; onUnauthorize
   }, [token]);
 
   const filteredCustomers = customers.filter((customer) => {
-    const haystack = `${customer.telegram_id} ${customer.alias_username ?? ''} ${customer.alias_email ?? ''} ${customer.display_name ?? ''}`.toLowerCase();
+    const haystack = `${customer.telegram_id} ${customer.phone ?? ''} ${customer.alias_username ?? ''} ${customer.alias_email ?? ''} ${customer.display_name ?? ''}`.toLowerCase();
     return haystack.includes(deferredSearch.trim().toLowerCase());
   });
 
@@ -1106,7 +1108,9 @@ function CustomersView({ token, onUnauthorized }: { token: string; onUnauthorize
             <tr>
               <th>Telegram</th>
               <th>Alias</th>
+              <th>Phone</th>
               <th>Status</th>
+              <th>Verified</th>
               <th>Invite</th>
               <th>Orders</th>
               <th>Last Login</th>
@@ -1117,9 +1121,15 @@ function CustomersView({ token, onUnauthorized }: { token: string; onUnauthorize
               <tr key={customer.id}>
                 <td>{customer.telegram_id}</td>
                 <td>{customer.alias_username || customer.alias_email || customer.display_name || 'N/A'}</td>
+                <td>{customer.phone || '—'}</td>
                 <td>
                   <StatusPill tone={customer.account_status || 'pending'}>
                     {humanize(customer.account_status)}
+                  </StatusPill>
+                </td>
+                <td>
+                  <StatusPill tone={customer.verified ? 'approved' : 'pending'}>
+                    {customer.verified ? 'Verified' : 'Pending'}
                   </StatusPill>
                 </td>
                 <td>{customer.invite_code || '—'}</td>
@@ -1136,6 +1146,7 @@ function CustomersView({ token, onUnauthorized }: { token: string; onUnauthorize
 
 function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized: () => void }) {
   const [invites, setInvites] = useState<InviteSummary[]>([]);
+  const [phone, setPhone] = useState('');
   const [aliasUsername, setAliasUsername] = useState('');
   const [aliasEmail, setAliasEmail] = useState('');
   const [targetRole, setTargetRole] = useState<'customer' | 'driver'>('customer');
@@ -1166,12 +1177,14 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
       await adminRequest(token, '/invites', {
         method: 'POST',
         body: JSON.stringify({
+          phone: phone || null,
           alias_username: aliasUsername || null,
           alias_email: aliasEmail || null,
           target_role: targetRole,
           notes: notes || null,
         }),
       });
+      setPhone('');
       setAliasUsername('');
       setAliasEmail('');
       setTargetRole('customer');
@@ -1201,6 +1214,15 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
           </div>
         </div>
         <form className="stack" onSubmit={createInvite}>
+          <label className="field">
+            <span>Phone number</span>
+            <input
+              required
+              value={phone}
+              onChange={(event) => setPhone(event.target.value)}
+              placeholder="+1 404 555 0101"
+            />
+          </label>
           <label className="field">
             <span>Invite role</span>
             <select value={targetRole} onChange={(event) => setTargetRole(event.target.value as 'customer' | 'driver')}>
@@ -1249,6 +1271,7 @@ function InvitesView({ token, onUnauthorized }: { token: string; onUnauthorized:
               </div>
               <dl className="detail-grid">
                 <DetailItem label="Role" value={humanize(invite.target_role)} />
+                <DetailItem label="Phone" value={invite.phone || 'Not set'} />
                 <DetailItem label="Claimed By" value={`${invite.claimed_by_telegram_id ?? '—'}`} />
                 <DetailItem label="Created" value={formatDate(invite.created_at)} />
               </dl>
