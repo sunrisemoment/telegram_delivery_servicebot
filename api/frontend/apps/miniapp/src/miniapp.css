@@ -17,6 +17,7 @@
   --radius-xl: 28px;
   --radius-lg: 22px;
   --radius-md: 18px;
+  --hero-image: url('../../../shared/bg.jpg');
 }
 
 * {
@@ -34,6 +35,8 @@ body {
   color: var(--ink);
   font-family: "Trebuchet MS", "Segoe UI Variable", sans-serif;
   background:
+    linear-gradient(rgba(247, 239, 224, 0.84), rgba(246, 236, 219, 0.9)),
+    var(--hero-image) center/cover fixed no-repeat,
     radial-gradient(circle at top right, rgba(214, 143, 61, 0.22), transparent 22%),
     radial-gradient(circle at left bottom, rgba(65, 108, 84, 0.14), transparent 18%),
     linear-gradient(180deg, var(--tg-bg) 0%, var(--bg) 100%);
@@ -41,6 +44,8 @@ body {
 
 body.miniapp-customer-theme {
   background:
+    linear-gradient(rgba(240, 238, 223, 0.84), rgba(220, 227, 206, 0.9)),
+    var(--hero-image) center/cover fixed no-repeat,
     radial-gradient(circle at top right, rgba(129, 160, 113, 0.24), transparent 24%),
     radial-gradient(circle at left bottom, rgba(75, 114, 78, 0.18), transparent 18%),
     linear-gradient(180deg, #f0eedf 0%, #dce3ce 100%);
@@ -128,6 +133,17 @@ button {
   align-items: flex-start;
   margin-bottom: 18px;
   animation: rise 420ms ease;
+  background:
+    linear-gradient(135deg, rgba(255, 250, 241, 0.9), rgba(244, 232, 214, 0.78)),
+    linear-gradient(rgba(30, 25, 18, 0.08), rgba(30, 25, 18, 0.08)),
+    var(--hero-image) center/cover no-repeat;
+}
+
+.miniapp-shell.customer-theme .miniapp-hero {
+  background:
+    linear-gradient(135deg, rgba(252, 250, 244, 0.9), rgba(232, 239, 221, 0.8)),
+    linear-gradient(rgba(24, 32, 22, 0.08), rgba(24, 32, 22, 0.08)),
+    var(--hero-image) center/cover no-repeat;
 }
 
 .hero-copy,

@@ -10,6 +10,7 @@
   --border: rgba(28, 24, 18, 0.1);
   --shadow: 0 20px 40px rgba(44, 30, 10, 0.1);
   --radius: 24px;
+  --hero-image: url('../../../shared/bg.jpg');
 }
 
 * {
@@ -20,6 +21,8 @@ body {
   margin: 0;
   min-height: 100vh;
   background:
+    linear-gradient(rgba(247, 241, 230, 0.9), rgba(239, 228, 209, 0.94)),
+    var(--hero-image) center/cover fixed no-repeat,
     radial-gradient(circle at top right, rgba(229, 161, 95, 0.28), transparent 24%),
     linear-gradient(180deg, #f7f1e6 0%, #efe4d1 100%);
   color: var(--ink);
@@ -241,6 +244,15 @@ textarea {
   justify-content: space-between;
   align-items: flex-start;
   gap: 16px;
+  padding: 24px;
+  border-radius: 28px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  background:
+    linear-gradient(135deg, rgba(255, 248, 238, 0.9), rgba(246, 237, 223, 0.82)),
+    linear-gradient(rgba(30, 24, 18, 0.08), rgba(30, 24, 18, 0.08)),
+    var(--hero-image) center/cover no-repeat;
+  overflow: hidden;
 }
 
 .page-header-main,
