@@ -1353,17 +1353,20 @@ function App() {
   return (
     <div className={`miniapp-shell ${isDriverApp ? 'driver-theme' : 'customer-theme'}`}>
       <header className="miniapp-hero">
-        <div>
-          <p className="eyebrow">Private Delivery Club</p>
-          <h1>{isDriverApp ? 'Driver dispatch inside Telegram.' : 'Invite-only ordering inside Telegram.'}</h1>
-          <p className="hero-copy">
-            {isDriverApp
-              ? 'Review assigned orders, update delivery status, and control driver availability without leaving Telegram.'
-              : 'Order, save delivery addresses, and track payment-gated dispatch from the Mini App instead of the bot chat.'}
-          </p>
-        </div>
-        <div className={`hero-badge ${authenticated ? 'active' : 'locked'}`}>
-          {authenticated ? `${humanize(appRole)} • ${humanize(customer?.account_status || 'active')}` : 'Locked'}
+        <div className="hero-cover" aria-hidden="true" />
+        <div className="hero-content-row">
+          <div>
+            <p className="eyebrow">Private Delivery Club</p>
+            <h1>{isDriverApp ? 'Driver dispatch inside Telegram.' : 'Invite-only ordering inside Telegram.'}</h1>
+            <p className="hero-copy">
+              {isDriverApp
+                ? 'Review assigned orders, update delivery status, and control driver availability without leaving Telegram.'
+                : 'Order, save delivery addresses, and track payment-gated dispatch from the Mini App instead of the bot chat.'}
+            </p>
+          </div>
+          <div className={`hero-badge ${authenticated ? 'active' : 'locked'}`}>
+            {authenticated ? `${humanize(appRole)} • ${humanize(customer?.account_status || 'active')}` : 'Locked'}
+          </div>
         </div>
       </header>
 

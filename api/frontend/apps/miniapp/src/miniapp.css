@@ -127,23 +127,40 @@ button {
 
 .miniapp-hero {
   padding: 28px;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
   gap: 18px;
-  align-items: flex-start;
   margin-bottom: 18px;
   animation: rise 420ms ease;
-  background:
-    linear-gradient(135deg, rgba(255, 250, 241, 0.9), rgba(244, 232, 214, 0.78)),
-    linear-gradient(rgba(30, 25, 18, 0.08), rgba(30, 25, 18, 0.08)),
-    var(--hero-image) center/cover no-repeat;
+  background: var(--panel);
 }
 
 .miniapp-shell.customer-theme .miniapp-hero {
+  background: var(--panel);
+}
+
+.hero-cover {
+  min-height: 180px;
+  border-radius: 24px;
+  border: 1px solid rgba(30, 25, 18, 0.08);
+  box-shadow: inset 0 -48px 64px rgba(20, 18, 13, 0.08);
   background:
-    linear-gradient(135deg, rgba(252, 250, 244, 0.9), rgba(232, 239, 221, 0.8)),
+    linear-gradient(135deg, rgba(255, 250, 241, 0.3), rgba(244, 232, 214, 0.16)),
+    linear-gradient(rgba(30, 25, 18, 0.08), rgba(30, 25, 18, 0.08)),
+    var(--hero-image) center 34%/cover no-repeat;
+}
+
+.miniapp-shell.customer-theme .hero-cover {
+  background:
+    linear-gradient(135deg, rgba(252, 250, 244, 0.22), rgba(232, 239, 221, 0.14)),
     linear-gradient(rgba(24, 32, 22, 0.08), rgba(24, 32, 22, 0.08)),
-    var(--hero-image) center/cover no-repeat;
+    var(--hero-image) center 34%/cover no-repeat;
+}
+
+.hero-content-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 18px;
 }
 
 .hero-copy,
@@ -723,9 +740,14 @@ textarea {
   }
 
   .miniapp-hero,
+  .hero-content-row,
   .section-head,
   .cart-line {
     flex-direction: column;
+  }
+
+  .hero-cover {
+    min-height: 150px;
   }
 
   .tabbar,
