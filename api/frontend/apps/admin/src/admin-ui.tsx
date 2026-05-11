@@ -20,11 +20,11 @@ export function StatCard({
 
 export function StatusPill({ tone, children }: { tone: string; children: ReactNode }) {
   const normalizedTone =
-    tone === 'approved' || tone === 'delivered' || tone === 'olive' || tone === 'active'
+    tone === 'approved' || tone === 'delivered' || tone === 'olive' || tone === 'active' || tone === 'reward_issued' || tone === 'issued' || tone === 'available'
       ? 'approved'
-      : tone === 'pending' || tone === 'placed' || tone === 'warning'
+      : tone === 'pending' || tone === 'placed' || tone === 'warning' || tone === 'signed_up' || tone === 'awaiting_admin_approval' || tone === 'qualified_order_placed'
         ? 'pending'
-        : tone === 'cancelled' || tone === 'inactive' || tone === 'revoked'
+        : tone === 'cancelled' || tone === 'inactive' || tone === 'revoked' || tone === 'rejected'
           ? 'cancelled'
           : 'neutral';
 

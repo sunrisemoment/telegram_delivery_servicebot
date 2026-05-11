@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from . import models
 from .btc_payment_gateway import btc_gateway
 from .dispatch_rules import MANUAL_PAYMENT_TYPES, get_payment_label, normalize_payment_type
+from .referral_service import evaluate_referral_rewards_for_order
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,12 @@ class PaymentService:
         )
         self.db.add(event)
 
+        if order.status == 'delivered':
+            evaluate_referral_rewards_for_order(
+                self.db,
+                order,
+                actor_username=str(confirmed_by),
+            )
         self.db.commit()
         
         logger.info(f"BTC payment confirmed for order {order_number} by admin {confirmed_by}")
@@ -149,6 +156,13 @@ class PaymentService:
             }
         )
         self.db.add(event)
+
+        if order.status == 'delivered':
+            evaluate_referral_rewards_for_order(
+                self.db,
+                order,
+                actor_username=str(confirmed_by),
+            )
         
         self.db.commit()
 

@@ -197,7 +197,23 @@ class AdminSupportTicketUpdate(BaseModel):
 
 
 class MiniAppReferralCreate(BaseModel):
-    phone: Optional[str] = None
-    alias_username: Optional[str] = None
-    alias_email: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class AdminReferralApprovalUpdate(BaseModel):
+    note: Optional[str] = None
+
+
+class AdminReferralBatchCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    code_count: int = Field(..., ge=1, le=500)
+    campaign_tag: Optional[str] = Field(default=None, max_length=100)
+    source_tag: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = None
+
+
+class AdminReferralManualRewardCreate(BaseModel):
+    recipient_customer_id: int
+    amount_cents: int = Field(..., ge=1)
+    reward_type: str = Field(default="vip_bonus", min_length=3, max_length=30)
     notes: Optional[str] = None

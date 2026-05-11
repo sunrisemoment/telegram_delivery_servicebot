@@ -683,6 +683,47 @@ tbody tr.selected-row {
   max-height: 240px;
 }
 
+.notice-panel {
+  border-color: rgba(56, 86, 63, 0.18);
+  background: rgba(239, 246, 236, 0.84);
+  color: var(--olive);
+}
+
+.approval-queue-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.approval-card {
+  display: grid;
+  gap: 14px;
+}
+
+.compact-header {
+  margin-bottom: 0;
+}
+
+.code-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.code-grid code {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(22, 20, 16, 0.08);
+}
+
+.table-subcopy {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .hours-grid {
   display: grid;
   gap: 12px;

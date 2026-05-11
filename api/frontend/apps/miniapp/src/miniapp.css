@@ -243,7 +243,7 @@ button {
 
 .tabbar {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -311,6 +311,10 @@ button {
   align-items: center;
 }
 
+.wrap-actions {
+  flex-wrap: wrap;
+}
+
 .section-head {
   justify-content: space-between;
   align-items: flex-start;
@@ -335,6 +339,14 @@ button {
 
 .feature-grid {
   grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+}
+
+.single-feature-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.referral-progress-grid {
+  align-items: stretch;
 }
 
 .detail-grid {
@@ -371,6 +383,10 @@ button {
 
 .detail-item strong {
   overflow-wrap: anywhere;
+}
+
+.referral-card .detail-grid {
+  margin-top: 12px;
 }
 
 .stat-tile strong {

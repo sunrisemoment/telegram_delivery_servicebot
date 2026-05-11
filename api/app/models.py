@@ -17,6 +17,7 @@ class Customer(Base):
     alias_email = Column(String(200), unique=True)
     app_role = Column(String(20), default="customer")
     account_status = Column(String(20), default="active")
+    approval_status = Column(String(20), default="approved")
     invite_id = Column(BigInteger, ForeignKey("customer_invites.id"))
     verified_bool = Column(Boolean, default=False)
     phone_verified_at = Column(DateTime(timezone=True))
@@ -39,6 +40,10 @@ class CustomerInvite(Base):
     alias_email = Column(String(200))
     phone = Column(String(32))
     target_role = Column(String(20), default="customer")
+    invite_kind = Column(String(30), default="direct")
+    campaign_tag = Column(String(100))
+    source_tag = Column(String(100))
+    referral_batch_id = Column(BigInteger, ForeignKey("referral_batches.id"))
     notes = Column(Text)
     status = Column(String(20), default="pending")
     created_by = Column(BigInteger, ForeignKey("customers.id"))
@@ -51,6 +56,7 @@ class CustomerInvite(Base):
 
     created_by_customer = relationship("Customer", foreign_keys=[created_by])
     claimed_by_customer = relationship("Customer", foreign_keys=[claimed_by_customer_id])
+    referral_batch = relationship("ReferralBatch", foreign_keys=[referral_batch_id], backref="invites")
 
 class CustomerAddress(Base):
     __tablename__ = "customer_addresses"
@@ -376,18 +382,69 @@ class Referral(Base):
     __tablename__ = "referrals"
 
     id = Column(BigInteger, primary_key=True, index=True)
-    referrer_customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    referrer_customer_id = Column(BigInteger, ForeignKey("customers.id"))
     referred_customer_id = Column(BigInteger, ForeignKey("customers.id"))
     invite_id = Column(BigInteger, ForeignKey("customer_invites.id"), nullable=False, unique=True)
-    status = Column(String(20), default="pending")
+    status = Column(String(32), default="created")
     reward_status = Column(String(20), default="pending")
     notes = Column(Text)
+    signed_up_at = Column(DateTime(timezone=True))
+    approved_at = Column(DateTime(timezone=True))
+    approved_by = Column(String(100))
+    rejected_at = Column(DateTime(timezone=True))
+    rejected_by = Column(String(100))
+    approval_note = Column(Text)
+    qualifying_order_id = Column(BigInteger, ForeignKey("orders.id"))
+    qualifying_order_placed_at = Column(DateTime(timezone=True))
+    friend_discount_order_id = Column(BigInteger, ForeignKey("orders.id"))
+    friend_discount_applied_at = Column(DateTime(timezone=True))
+    reward_issued_at = Column(DateTime(timezone=True))
+    friend_discount_cents = Column(Integer, default=2500)
+    referrer_credit_cents = Column(Integer, default=1500)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     claimed_at = Column(DateTime(timezone=True))
 
     referrer_customer = relationship("Customer", foreign_keys=[referrer_customer_id], backref="referrals_sent")
     referred_customer = relationship("Customer", foreign_keys=[referred_customer_id], backref="referrals_received")
     invite = relationship("CustomerInvite", foreign_keys=[invite_id], backref="referral")
+    qualifying_order = relationship("Order", foreign_keys=[qualifying_order_id])
+    friend_discount_order = relationship("Order", foreign_keys=[friend_discount_order_id])
+
+
+class ReferralBatch(Base):
+    __tablename__ = "referral_batches"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    name = Column(String(120), nullable=False)
+    campaign_tag = Column(String(100))
+    source_tag = Column(String(100))
+    code_count = Column(Integer, default=0)
+    notes = Column(Text)
+    created_by = Column(BigInteger, ForeignKey("customers.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    created_by_customer = relationship("Customer", foreign_keys=[created_by])
+
+
+class ReferralReward(Base):
+    __tablename__ = "referral_rewards"
+
+    id = Column(BigInteger, primary_key=True, index=True)
+    recipient_customer_id = Column(BigInteger, ForeignKey("customers.id"), nullable=False)
+    referral_id = Column(BigInteger, ForeignKey("referrals.id"))
+    order_id = Column(BigInteger, ForeignKey("orders.id"))
+    reward_type = Column(String(30), default="referrer_credit")
+    milestone_number = Column(Integer)
+    amount_cents = Column(Integer, nullable=False)
+    status = Column(String(20), default="available")
+    notes = Column(Text)
+    issued_by = Column(String(100))
+    issued_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    recipient_customer = relationship("Customer", foreign_keys=[recipient_customer_id], backref="referral_rewards")
+    referral = relationship("Referral", foreign_keys=[referral_id], backref="rewards")
+    order = relationship("Order", foreign_keys=[order_id])
 
 
 class AuditLog(Base):

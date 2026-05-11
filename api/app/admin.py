@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Request, Response
 import os
 import random
 import shutil
@@ -48,6 +48,21 @@ from .dispatch_service import (
 from .miniapp_auth import normalize_app_role
 from .menu_utils import get_menu_item_photo_urls
 from .phone_utils import normalize_phone_number
+from .referral_service import (
+    BULK_REFERRAL_INVITE_KIND,
+    REFERRAL_INVITE_KIND,
+    build_invite_link,
+    build_referral_batch_csv,
+    ensure_referral_for_invite,
+    generate_referral_code,
+    get_referral_progress,
+    reject_referral,
+    serialize_referral,
+    serialize_referral_batch,
+    serialize_referral_reward,
+    approve_referral,
+)
+from html import escape
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +106,10 @@ def _serialize_invite(invite: models.CustomerInvite) -> dict:
         "alias_username": invite.alias_username,
         "alias_email": invite.alias_email,
         "target_role": normalize_app_role(invite.target_role) or "customer",
+        "invite_kind": getattr(invite, "invite_kind", "direct"),
+        "campaign_tag": getattr(invite, "campaign_tag", None),
+        "source_tag": getattr(invite, "source_tag", None),
+        "referral_batch_id": getattr(invite, "referral_batch_id", None),
         "notes": invite.notes,
         "status": invite.status,
         "claimed_by_customer_id": invite.claimed_by_customer_id,
@@ -145,23 +164,6 @@ def _serialize_support_ticket(ticket: models.SupportTicket) -> dict:
         "updated_at": ticket.updated_at.isoformat() if ticket.updated_at else None,
     }
 
-
-def _serialize_referral(referral: models.Referral) -> dict:
-    return {
-        "id": referral.id,
-        "invite_code": referral.invite.code if referral.invite else None,
-        "referrer_customer_id": referral.referrer_customer_id,
-        "referrer_name": referral.referrer_customer.display_name if referral.referrer_customer else None,
-        "referred_customer_id": referral.referred_customer_id,
-        "referred_name": referral.referred_customer.display_name if referral.referred_customer else None,
-        "status": referral.status,
-        "reward_status": referral.reward_status,
-        "notes": referral.notes,
-        "created_at": referral.created_at.isoformat() if referral.created_at else None,
-        "claimed_at": referral.claimed_at.isoformat() if referral.claimed_at else None,
-    }
-
-
 def _serialize_audit_log(entry: models.AuditLog) -> dict:
     return {
         "id": entry.id,
@@ -173,6 +175,37 @@ def _serialize_audit_log(entry: models.AuditLog) -> dict:
         "entity_id": entry.entity_id,
         "payload": entry.payload or {},
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+def _notify_referral_customer(customer: models.Customer | None, message: str) -> bool:
+    if not customer or not customer.telegram_id:
+        return False
+    return telegram_service.send_message(customer.telegram_id, message)
+
+
+def _build_referral_dashboard_payload(db: Session) -> dict:
+    referrals = db.query(models.Referral).order_by(models.Referral.created_at.desc()).limit(300).all()
+    pending_approvals = [
+        referral
+        for referral in referrals
+        if referral.status in {"signed_up", "awaiting_admin_approval"}
+    ]
+    rewards = db.query(models.ReferralReward).order_by(models.ReferralReward.created_at.desc()).limit(300).all()
+    batches = db.query(models.ReferralBatch).order_by(models.ReferralBatch.created_at.desc()).limit(100).all()
+
+    return {
+        "referrals": [serialize_referral(referral) for referral in referrals],
+        "pending_approvals": [serialize_referral(referral) for referral in pending_approvals],
+        "rewards": [serialize_referral_reward(reward) for reward in rewards],
+        "batches": [serialize_referral_batch(batch) for batch in batches],
+        "summary": {
+            "created_count": sum(1 for referral in referrals if referral.status == "created"),
+            "signed_up_count": sum(1 for referral in referrals if referral.status == "signed_up"),
+            "awaiting_admin_approval_count": sum(1 for referral in referrals if referral.status == "awaiting_admin_approval"),
+            "approved_count": sum(1 for referral in referrals if referral.status == "approved"),
+            "reward_issued_count": sum(1 for referral in referrals if referral.status == "reward_issued"),
+        },
     }
 
 
@@ -2800,8 +2833,242 @@ async def get_referrals(
     db: Session = Depends(get_db),
     admin: str = Depends(get_current_admin),
 ):
-    referrals = db.query(models.Referral).order_by(models.Referral.created_at.desc()).limit(200).all()
-    return [_serialize_referral(referral) for referral in referrals]
+    return _build_referral_dashboard_payload(db)
+
+
+@router.get("/referrals/pending-approvals")
+async def get_referral_pending_approvals(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    referrals = db.query(models.Referral).filter(
+        models.Referral.status.in_(["signed_up", "awaiting_admin_approval"])
+    ).order_by(models.Referral.created_at.desc()).all()
+    return [serialize_referral(referral) for referral in referrals]
+
+
+@router.post("/referrals/{referral_id}/approve")
+async def approve_referral_entry(
+    referral_id: int,
+    payload: schemas.AdminReferralApprovalUpdate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    referral = db.query(models.Referral).filter(models.Referral.id == referral_id).first()
+    if not referral:
+        raise HTTPException(status_code=404, detail="Referral not found")
+
+    referred_customer = referral.referred_customer
+    approve_referral(
+        referral,
+        referred_customer,
+        admin_username=admin,
+        note=(payload.note or "").strip() or None,
+    )
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="referral_approved",
+        entity_type="referral",
+        entity_id=referral.id,
+        payload={
+            "referred_customer_id": referred_customer.id if referred_customer else None,
+            "invite_code": referral.invite.code if referral.invite else None,
+            "note": (payload.note or "").strip() or None,
+        },
+    )
+    db.commit()
+    db.refresh(referral)
+
+    _notify_referral_customer(
+        referred_customer,
+        (
+            "✅ <b>Referral Approved</b>\n\n"
+            "Your account has been approved by admin. You can now place your first qualifying order in the Mini App."
+        ),
+    )
+    return serialize_referral(referral)
+
+
+@router.post("/referrals/{referral_id}/reject")
+async def reject_referral_entry(
+    referral_id: int,
+    payload: schemas.AdminReferralApprovalUpdate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    referral = db.query(models.Referral).filter(models.Referral.id == referral_id).first()
+    if not referral:
+        raise HTTPException(status_code=404, detail="Referral not found")
+
+    referred_customer = referral.referred_customer
+    reject_referral(
+        referral,
+        referred_customer,
+        admin_username=admin,
+        note=(payload.note or "").strip() or None,
+    )
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="referral_rejected",
+        entity_type="referral",
+        entity_id=referral.id,
+        payload={
+            "referred_customer_id": referred_customer.id if referred_customer else None,
+            "invite_code": referral.invite.code if referral.invite else None,
+            "note": (payload.note or "").strip() or None,
+        },
+    )
+    db.commit()
+    db.refresh(referral)
+
+    _notify_referral_customer(
+        referred_customer,
+        "⛔ <b>Referral Rejected</b>\n\n"
+        + (
+            escape(payload.note.strip())
+            if payload.note and payload.note.strip()
+            else "This referral account was rejected during admin review. Contact support if you need clarification."
+        ),
+    )
+    return serialize_referral(referral)
+
+
+@router.get("/referrals/rewards")
+async def get_referral_rewards(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    rewards = db.query(models.ReferralReward).order_by(models.ReferralReward.created_at.desc()).limit(300).all()
+    return [serialize_referral_reward(reward) for reward in rewards]
+
+
+@router.post("/referrals/rewards/manual")
+async def create_manual_referral_reward(
+    payload: schemas.AdminReferralManualRewardCreate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    customer = db.query(models.Customer).filter(models.Customer.id == payload.recipient_customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    reward = models.ReferralReward(
+        recipient_customer_id=customer.id,
+        reward_type=(payload.reward_type or "vip_bonus").strip().lower(),
+        amount_cents=payload.amount_cents,
+        status="available",
+        notes=(payload.notes or "").strip() or None,
+        issued_by=admin,
+        issued_at=datetime.now(),
+    )
+    db.add(reward)
+    db.flush()
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="referral_manual_reward_created",
+        entity_type="referral_reward",
+        entity_id=reward.id,
+        payload={
+            "recipient_customer_id": customer.id,
+            "amount_cents": reward.amount_cents,
+            "reward_type": reward.reward_type,
+        },
+    )
+    db.commit()
+    db.refresh(reward)
+    return serialize_referral_reward(reward)
+
+
+@router.get("/referrals/batches")
+async def get_referral_batches(
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    batches = db.query(models.ReferralBatch).order_by(models.ReferralBatch.created_at.desc()).all()
+    return [serialize_referral_batch(batch) for batch in batches]
+
+
+@router.post("/referrals/batches")
+async def create_referral_batch(
+    payload: schemas.AdminReferralBatchCreate,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    admin_customer = _get_or_create_admin_customer(db)
+    batch = models.ReferralBatch(
+        name=payload.name.strip(),
+        campaign_tag=(payload.campaign_tag or "").strip() or None,
+        source_tag=(payload.source_tag or "").strip() or None,
+        code_count=payload.code_count,
+        notes=(payload.notes or "").strip() or None,
+        created_by=admin_customer.id,
+    )
+    db.add(batch)
+    db.flush()
+
+    created_codes: list[str] = []
+    for _ in range(payload.code_count):
+        invite = models.CustomerInvite(
+            code=generate_referral_code(db),
+            target_role="customer",
+            invite_kind=BULK_REFERRAL_INVITE_KIND,
+            campaign_tag=batch.campaign_tag,
+            source_tag=batch.source_tag,
+            referral_batch_id=batch.id,
+            notes=batch.notes,
+            status="pending",
+            created_by=admin_customer.id,
+        )
+        db.add(invite)
+        db.flush()
+        ensure_referral_for_invite(db, invite, note=invite.notes)
+        created_codes.append(invite.code)
+
+    log_audit_event(
+        db,
+        actor_type="admin",
+        actor_username=admin,
+        action="referral_batch_created",
+        entity_type="referral_batch",
+        entity_id=batch.id,
+        payload={
+            "name": batch.name,
+            "code_count": batch.code_count,
+            "campaign_tag": batch.campaign_tag,
+            "source_tag": batch.source_tag,
+        },
+    )
+    db.commit()
+    db.refresh(batch)
+    return {
+        "batch": serialize_referral_batch(batch),
+        "codes": created_codes,
+    }
+
+
+@router.get("/referrals/batches/{batch_id}/csv")
+async def export_referral_batch_csv(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    admin: str = Depends(get_current_admin),
+):
+    batch = db.query(models.ReferralBatch).filter(models.ReferralBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Referral batch not found")
+
+    csv_content = build_referral_batch_csv(batch)
+    filename = f"referral-batch-{batch.id}.csv"
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/audit-logs")

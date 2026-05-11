@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 import hashlib
-import random
 import secrets
 from uuid import uuid4
 
@@ -39,6 +38,21 @@ from .miniapp_auth import (
 )
 from .payment_service import get_payment_service
 from .phone_utils import mask_phone_number, normalize_phone_number, phone_numbers_match
+from .referral_service import (
+    REFERRAL_INVITE_KIND,
+    build_invite_link,
+    ensure_referral_for_invite,
+    evaluate_referral_rewards_for_order,
+    generate_referral_code,
+    get_customer_referral,
+    get_referral_discount_for_customer,
+    get_referral_progress,
+    is_referral_invite,
+    mark_qualifying_order_placed,
+    mark_referral_awaiting_approval,
+    mark_referral_signed_up,
+    serialize_referral,
+)
 from .telegram_service import telegram_service
 
 router = APIRouter(prefix="/miniapp-api", tags=["miniapp"])
@@ -62,6 +76,7 @@ def _serialize_customer(customer: models.Customer) -> dict:
         "alias_email": customer.alias_email,
         "app_role": normalize_app_role(getattr(customer, "app_role", None)) or "customer",
         "account_status": customer.account_status,
+        "approval_status": getattr(customer, "approval_status", "approved") or "approved",
         "verified_bool": bool(customer.verified_bool),
         "phone_verified_at": customer.phone_verified_at.isoformat() if customer.phone_verified_at else None,
         "invite_code": invite_code,
@@ -194,20 +209,6 @@ def _serialize_support_ticket(ticket: models.SupportTicket) -> dict:
     }
 
 
-def _serialize_referral(referral: models.Referral) -> dict:
-    return {
-        "id": referral.id,
-        "invite_code": referral.invite.code if referral.invite else None,
-        "status": referral.status,
-        "reward_status": referral.reward_status,
-        "notes": referral.notes,
-        "referred_customer_id": referral.referred_customer_id,
-        "referred_name": referral.referred_customer.display_name if referral.referred_customer else None,
-        "created_at": referral.created_at.isoformat() if referral.created_at else None,
-        "claimed_at": referral.claimed_at.isoformat() if referral.claimed_at else None,
-    }
-
-
 def _build_pickup_context(order: models.Order, include_history: bool = False) -> dict:
     if order.delivery_or_pickup != "pickup":
         payload = {
@@ -275,8 +276,34 @@ def _resolve_customer_role(customer: models.Customer) -> str:
 
 def _require_customer_role(customer: models.Customer) -> models.Customer:
     _require_phone_verified(customer)
+    _require_customer_approved(customer)
     if _resolve_customer_role(customer) != "customer":
         raise HTTPException(status_code=403, detail="This Mini App account is configured for driver access")
+    return customer
+
+
+def _customer_requires_admin_approval(customer: models.Customer) -> bool:
+    return getattr(customer, "approval_status", "approved") == "pending"
+
+
+def _require_customer_approved(customer: models.Customer) -> models.Customer:
+    approval_status = getattr(customer, "approval_status", "approved") or "approved"
+    if approval_status == "rejected":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "referral_rejected",
+                "message": "This referral account was rejected by admin review",
+            },
+        )
+    if approval_status == "pending":
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "referral_approval_pending",
+                "message": "Admin approval is still required before this referral account can place orders",
+            },
+        )
     return customer
 
 
@@ -365,6 +392,7 @@ def _ensure_driver_profile(
 
 def _get_driver_for_customer(db: Session, customer: models.Customer) -> models.Driver:
     _require_phone_verified(customer)
+    _require_customer_approved(customer)
     if _resolve_customer_role(customer) != "driver":
         raise HTTPException(status_code=403, detail="This Mini App account is not configured for driver access")
 
@@ -464,6 +492,10 @@ def _claim_invite_for_customer(
             raise HTTPException(status_code=409, detail={"code": "invite_claimed", "message": "Invite code has already been claimed"})
         customer.app_role = invite_role
         _bind_customer_phone(customer, invite.phone)
+        if is_referral_invite(invite):
+            customer.approval_status = getattr(customer, "approval_status", "pending") or "pending"
+        else:
+            customer.approval_status = "approved"
         _sync_driver_contact_from_customer(db, customer)
         return invite
 
@@ -486,12 +518,10 @@ def _claim_invite_for_customer(
         customer.alias_username = _ensure_unique_alias_username(db, invite.alias_username, customer.id)
     _bind_customer_phone(customer, invite.phone)
     _sync_driver_contact_from_customer(db, customer)
-
-    referral = db.query(models.Referral).filter(models.Referral.invite_id == invite.id).first()
-    if referral and not referral.referred_customer_id:
-        referral.referred_customer_id = customer.id
-        referral.status = "claimed"
-        referral.claimed_at = datetime.now(timezone.utc)
+    if is_referral_invite(invite):
+        mark_referral_signed_up(db, invite, customer)
+    else:
+        customer.approval_status = "approved"
     return invite
 
 
@@ -516,6 +546,16 @@ def _send_admin_order_notification(db: Session, order: models.Order) -> None:
         f"📋 <b>Items:</b>\n{items_text}"
     )
     telegram_service.send_message(contact_settings.telegram_id, message)
+
+
+def _notify_admin_referral_event(db: Session, *, title: str, lines: list[str]) -> None:
+    contact_settings = db.query(models.ContactSettings).first()
+    if not contact_settings or not contact_settings.telegram_id:
+        return
+
+    message = [f"🎁 <b>{escape(title)}</b>"]
+    message.extend(line for line in lines if line)
+    telegram_service.send_message(contact_settings.telegram_id, "\n".join(message))
 
 
 def _get_delivery_minimum_subtotal_cents(db: Session) -> int:
@@ -580,6 +620,8 @@ async def miniapp_telegram_auth(
     telegram_id = telegram_user["id"]
     start_param = normalize_invite_code(auth_data.get("start_param"))
     provided_invite_code = normalize_invite_code(auth_request.invite_code) or start_param
+    claimed_referral_signup = False
+    claimed_referral_invite: models.CustomerInvite | None = None
 
     customer = db.query(models.Customer).filter(models.Customer.telegram_id == telegram_id).first()
     if customer and customer.account_status == "revoked":
@@ -600,16 +642,21 @@ async def miniapp_telegram_auth(
             alias_email=invite.alias_email.strip().lower() if invite.alias_email else None,
             app_role=normalize_app_role(invite.target_role) or "customer",
             account_status="pending_phone_verification" if invite_phone else "active",
+            approval_status="pending" if is_referral_invite(invite) else "approved",
             verified_bool=False,
         )
         db.add(customer)
         db.flush()
         _claim_invite_for_customer(db, invite, customer, telegram_id)
+        claimed_referral_signup = is_referral_invite(invite)
+        claimed_referral_invite = invite
     elif not customer.invite_id:
         if not provided_invite_code:
             raise HTTPException(status_code=403, detail={"code": "invite_required", "message": "An invite code is required to activate this account"})
         invite = _find_valid_invite(db, provided_invite_code)
         _claim_invite_for_customer(db, invite, customer, telegram_id)
+        claimed_referral_signup = is_referral_invite(invite)
+        claimed_referral_invite = invite
 
     customer.display_name = build_customer_display_name(telegram_user)
     if telegram_user.get("username") and not customer.alias_username:
@@ -620,6 +667,18 @@ async def miniapp_telegram_auth(
         _sync_driver_contact_from_customer(db, customer)
     db.commit()
     db.refresh(customer)
+
+    if claimed_referral_signup and claimed_referral_invite:
+        _notify_admin_referral_event(
+            db,
+            title="Referred User Signed Up",
+            lines=[
+                f"👤 <b>Customer:</b> {escape(str(customer.display_name or customer.alias_username or customer.telegram_id))}",
+                f"🔐 <b>Code:</b> <code>{claimed_referral_invite.code}</code>",
+                f"🙋 <b>Referred By:</b> {escape(str(customer.invite.created_by_customer.display_name if customer.invite and customer.invite.created_by_customer else 'Bulk / campaign'))}",
+                f"📱 <b>Phone:</b> {escape(customer.phone or 'Not provided')}",
+            ],
+        )
 
     session = issue_miniapp_session(
         db=db,
@@ -668,8 +727,9 @@ async def miniapp_config(
     contact_settings = db.query(models.ContactSettings).first()
     app_role = _resolve_customer_role(customer)
     phone_verification_required = _phone_verification_required(customer)
+    pending_admin_approval = _customer_requires_admin_approval(customer)
     driver_profile = None
-    if app_role == "driver" and not phone_verification_required:
+    if app_role == "driver" and not phone_verification_required and not pending_admin_approval:
         driver_profile = _serialize_driver_profile(db, _get_driver_for_customer(db, customer))
     return {
         "customer": _serialize_customer(customer),
@@ -678,6 +738,7 @@ async def miniapp_config(
         "btc_discount_percent": settings.btc_discount_percent if settings else 0,
         "delivery_minimum_subtotal_cents": int(getattr(settings, "delivery_minimum_subtotal_cents", 7500) or 0) if settings else 7500,
         "phone_verification_required": phone_verification_required,
+        "pending_admin_approval": pending_admin_approval,
         "contact": {
             "welcome_message": contact_settings.welcome_message if contact_settings else "Welcome",
             "telegram_username": contact_settings.telegram_username if contact_settings else "",
@@ -723,6 +784,7 @@ async def miniapp_orders(
             models.Order.driver_id == driver.id
         ).order_by(models.Order.created_at.desc()).all()
     else:
+        _require_customer_role(customer)
         orders = db.query(models.Order).filter(
             models.Order.customer_id == customer.id
         ).order_by(models.Order.created_at.desc()).all()
@@ -932,6 +994,11 @@ async def miniapp_create_order(
         pickup_address_text = f"{pickup_address.name} - {pickup_address.address}"
 
     total_cents = subtotal_cents + delivery_fee_cents
+    referral_discount = get_referral_discount_for_customer(
+        db,
+        customer,
+        subtotal_cents=subtotal_cents,
+    )
     payment_metadata = {
         "source": "miniapp",
         "delivery_zone": delivery_zone,
@@ -940,6 +1007,18 @@ async def miniapp_create_order(
         "resolved_address": delivery_quote.get("resolved_address"),
         "geocoder_provider": delivery_quote.get("geocoder_provider"),
     }
+    if referral_discount:
+        discount_cents = int(referral_discount["discount_cents"])
+        payment_metadata.update(
+            {
+                "referral_discount_cents": discount_cents,
+                "referral_code": referral_discount["invite_code"],
+                "referral_discount_label": "$25 referral discount",
+                "original_total_cents": total_cents,
+            }
+        )
+        total_cents = max(total_cents - discount_cents, 0)
+
     if payment_type == "btc":
         settings = db.query(models.Settings).first()
         discount_percent = settings.btc_discount_percent if settings else 0
@@ -971,6 +1050,9 @@ async def miniapp_create_order(
     )
     order = crud.create_order(db, order_create)
 
+    if referral_discount:
+        mark_qualifying_order_placed(referral_discount["referral"], order)
+
     try:
         inventory_service.create_reservations(order.id, [item.dict() for item in normalized_items])
     except Exception as exc:
@@ -984,6 +1066,8 @@ async def miniapp_create_order(
         payload={
             "customer_alias": customer.alias_username,
             "invite_code": customer.invite.code if customer.invite else None,
+            "referral_code": payment_metadata.get("referral_code"),
+            "referral_discount_cents": payment_metadata.get("referral_discount_cents"),
         },
     )
     db.add(order_event)
@@ -1206,7 +1290,10 @@ async def miniapp_referrals(
     referrals = db.query(models.Referral).filter(
         models.Referral.referrer_customer_id == customer.id
     ).order_by(models.Referral.created_at.desc()).all()
-    return [_serialize_referral(referral) for referral in referrals]
+    return {
+        "referrals": [serialize_referral(referral) for referral in referrals],
+        "progress": get_referral_progress(db, customer.id),
+    }
 
 
 @router.post("/referrals")
@@ -1216,32 +1303,25 @@ async def miniapp_create_referral(
     customer: models.Customer = Depends(get_current_miniapp_customer),
 ):
     _require_customer_role(customer)
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    while True:
-        code = "".join(random.choice(alphabet) for _ in range(8))
-        if not db.query(models.CustomerInvite).filter(models.CustomerInvite.code == code).first():
-            break
+    code = generate_referral_code(db)
 
     invite = models.CustomerInvite(
         code=code,
-        phone=normalize_phone_number(referral_data.phone),
-        alias_username=referral_data.alias_username,
-        alias_email=referral_data.alias_email,
         target_role="customer",
-        notes=referral_data.notes,
+        invite_kind=REFERRAL_INVITE_KIND,
+        notes=(referral_data.notes or "").strip() or None,
         status="pending",
         created_by=customer.id,
     )
     db.add(invite)
     db.flush()
 
-    referral = models.Referral(
+    referral = ensure_referral_for_invite(
+        db,
+        invite,
         referrer_customer_id=customer.id,
-        invite_id=invite.id,
-        status="pending",
-        notes=referral_data.notes,
+        note=invite.notes,
     )
-    db.add(referral)
     db.commit()
     db.refresh(referral)
     log_audit_event(
@@ -1251,12 +1331,25 @@ async def miniapp_create_referral(
         action="referral_created",
         entity_type="referral",
         entity_id=referral.id,
-        payload={"invite_code": invite.code},
+        payload={
+            "invite_code": invite.code,
+            "invite_link": build_invite_link(invite.code),
+            "note": invite.notes,
+        },
     )
     db.commit()
+    _notify_admin_referral_event(
+        db,
+        title="New Referral Code Created",
+        lines=[
+            f"👤 <b>Referrer:</b> {escape(str(customer.display_name or customer.alias_username or customer.telegram_id))}",
+            f"🔐 <b>Code:</b> <code>{invite.code}</code>",
+            f"📝 <b>Who is this invite for?</b> {escape(invite.notes or 'Not specified')}",
+        ],
+    )
     return {
-        "message": "Referral invite created",
-        "referral": _serialize_referral(referral),
+        "message": "Referral code generated",
+        "referral": serialize_referral(referral),
     }
 
 
@@ -1325,13 +1418,28 @@ async def miniapp_confirm_phone_verification(
     customer.phone = expected_phone
     _clear_customer_phone_verification_state(customer, verified=True)
     _sync_driver_contact_from_customer(db, customer)
+    referral = get_customer_referral(db, customer)
+    if referral and is_referral_invite(customer.invite):
+        mark_referral_awaiting_approval(referral)
     db.commit()
     db.refresh(customer)
 
     driver_profile = None
-    if _resolve_customer_role(customer) == "driver":
+    if _resolve_customer_role(customer) == "driver" and not _customer_requires_admin_approval(customer):
         driver = _get_driver_for_customer(db, customer)
         driver_profile = _serialize_driver_profile(db, driver)
+
+    if referral and referral.status == "awaiting_admin_approval":
+        _notify_admin_referral_event(
+            db,
+            title="Referral Signup Pending Approval",
+            lines=[
+                f"👤 <b>Customer:</b> {escape(str(customer.display_name or customer.alias_username or customer.telegram_id))}",
+                f"📱 <b>Phone:</b> {escape(customer.phone or 'Not provided')}",
+                f"🔐 <b>Code:</b> <code>{customer.invite.code if customer.invite else ''}</code>",
+                f"🙋 <b>Referred By:</b> {escape(str(referral.referrer_customer.display_name if referral.referrer_customer else 'Bulk / campaign'))}",
+            ],
+        )
 
     return {
         "message": "Phone number verified",
@@ -1586,6 +1694,16 @@ async def miniapp_update_driver_order_status(
     )
     db.commit()
     db.refresh(order)
+
+    if next_status == "delivered":
+        reward_result = evaluate_referral_rewards_for_order(
+            db,
+            order,
+            actor_username=driver.name or customer.alias_username or str(customer.telegram_id),
+        )
+        if reward_result:
+            db.commit()
+            db.refresh(order)
 
     if order.customer and order.customer.telegram_id:
         telegram_service.notify_order_status_update(

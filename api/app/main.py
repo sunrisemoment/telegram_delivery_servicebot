@@ -12,6 +12,11 @@ from . import models, crud, schemas
 from .inventory_service import get_inventory_service
 from .menu_utils import get_menu_item_photo_urls
 from .phone_utils import normalize_phone_number
+from .referral_service import (
+    evaluate_referral_rewards_for_order,
+    get_referral_discount_for_customer,
+    mark_qualifying_order_placed,
+)
 from .dispatch_rules import (
     ACTIVE_DRIVER_ORDER_STATUSES,
     driver_can_accept_order,
@@ -246,36 +251,6 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
                     detail=f"Delivery orders require a minimum subtotal of ${minimum_amount:.2f}",
                 )
 
-        total_cents = order_data['total_cents']
-        logger.info(f"delivery fee sents: {delivery_fee_cents}")
-        # Apply BTC discount if applicable
-        if order_data.get('payment_type') == 'btc':
-            # Get BTC discount from settings
-            settings = db.query(models.Settings).first()
-            if settings and settings.btc_discount_percent > 0:
-                # Calculate discount amount
-                discount_percent = settings.btc_discount_percent
-                subtotal_with_delivery = order_data['subtotal_cents'] + delivery_fee_cents
-                discount_amount = int(subtotal_with_delivery * discount_percent / 100)
-                logger.info(f"discount amount {discount_amount}")
-                # Apply discount to total
-                total_cents = subtotal_with_delivery - discount_amount
-                logger.info(f"total cents: {total_cents}")
-                # Store original and discounted amounts
-                order_data['original_total_cents'] = subtotal_with_delivery
-                order_data['btc_discount_percent'] = discount_percent
-                order_data['btc_discount_amount_cents'] = discount_amount
-            else:
-                # No discount applied
-                total_cents = order_data['subtotal_cents'] + delivery_fee_cents
-        else:
-            # Regular payment - verify the total matches subtotal + delivery fee
-            expected_total = order_data['subtotal_cents'] + delivery_fee_cents
-            if total_cents != expected_total:
-                logger.warning(f"Total mismatch: expected {expected_total}, got {total_cents}")
-                # Use the calculated total for consistency
-                total_cents = expected_total
-        
         # Check inventory availability
         inventory_service = get_inventory_service(db)
         for item in order_data['items']:
@@ -304,6 +279,44 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(customer)
 
+        approval_status = getattr(customer, 'approval_status', 'approved') or 'approved'
+        if approval_status == 'pending':
+            raise HTTPException(status_code=403, detail="Admin approval is required before this account can place orders")
+        if approval_status == 'rejected':
+            raise HTTPException(status_code=403, detail="This account was rejected during referral review")
+
+        subtotal_with_delivery = order_data['subtotal_cents'] + delivery_fee_cents
+        total_cents = subtotal_with_delivery
+        referral_discount = get_referral_discount_for_customer(
+            db,
+            customer,
+            subtotal_cents=order_data['subtotal_cents'],
+        )
+        if referral_discount:
+            discount_cents = int(referral_discount['discount_cents'])
+            total_cents = max(total_cents - discount_cents, 0)
+            order_data['referral_discount_cents'] = discount_cents
+            order_data['referral_code'] = referral_discount['invite_code']
+            order_data['original_total_cents'] = subtotal_with_delivery
+
+        logger.info(f"delivery fee cents: {delivery_fee_cents}")
+        if order_data.get('payment_type') == 'btc':
+            settings = db.query(models.Settings).first()
+            if settings and settings.btc_discount_percent > 0:
+                discount_percent = settings.btc_discount_percent
+                discount_amount = int(total_cents * discount_percent / 100)
+                logger.info(f"btc discount amount {discount_amount}")
+                total_cents -= discount_amount
+                order_data['btc_discount_percent'] = discount_percent
+                order_data['btc_discount_amount_cents'] = discount_amount
+            else:
+                total_cents = total_cents
+        else:
+            expected_total = total_cents
+            if order_data['total_cents'] != expected_total:
+                logger.warning(f"Total mismatch: expected {expected_total}, got {order_data['total_cents']}")
+                total_cents = expected_total
+
         # Prepare payment metadata
         payment_metadata = {
             'delivery_zone': delivery_quote.get('delivery_zone'),
@@ -312,6 +325,13 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
             'resolved_address': delivery_quote.get('resolved_address'),
             'geocoder_provider': delivery_quote.get('geocoder_provider'),
         }
+        if order_data.get('referral_discount_cents'):
+            payment_metadata.update({
+                'original_total_cents': order_data.get('original_total_cents'),
+                'referral_discount_cents': order_data.get('referral_discount_cents'),
+                'referral_code': order_data.get('referral_code'),
+                'referral_discount_label': '$25 referral discount',
+            })
         if order_data.get('payment_type') == 'btc':
             payment_metadata.update({
                 'original_total_cents': order_data.get('original_total_cents'),
@@ -336,6 +356,8 @@ async def create_order(order_data: dict, db: Session = Depends(get_db)):
             payment_metadata=payment_metadata
         )
         order = crud.create_order(db, order_create)
+        if referral_discount:
+            mark_qualifying_order_placed(referral_discount['referral'], order)
         
         # Create inventory reservations
         try:
@@ -1027,6 +1049,14 @@ async def update_order_status(order_number: str, status_data: dict, db: Session 
         db.add(event)
         
         db.commit()
+
+        if new_status == 'delivered':
+            evaluate_referral_rewards_for_order(
+                db,
+                order,
+                actor_username=str(driver_id or 'system'),
+            )
+            db.commit()
         
         # Notify customer about status update
         import asyncio

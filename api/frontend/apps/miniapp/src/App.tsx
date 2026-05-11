@@ -13,6 +13,8 @@ import type {
   MiniAppOrder,
   MiniAppRole,
   PickupLocation,
+  ReferralListResponse,
+  ReferralProgressSummary,
   ReferralSummary,
   SupportTicketSummary,
 } from '@shared/types';
@@ -23,7 +25,7 @@ const LEGACY_SESSION_STORAGE_KEY = 'miniappSessionToken';
 const CART_STORAGE_KEY = 'delivery_bot.miniapp_cart';
 const LEGACY_CART_STORAGE_KEY = 'miniappCart';
 
-type ViewKey = 'home' | 'menu' | 'orders' | 'account';
+type ViewKey = 'home' | 'menu' | 'orders' | 'referrals' | 'account';
 type DeliveryMode = 'delivery' | 'pickup';
 type ToastTone = 'default' | 'error';
 type AuthTone = 'default' | 'error';
@@ -300,6 +302,13 @@ function App() {
   const [pickupLocations, setPickupLocations] = useState<PickupLocation[]>([]);
   const [supportTickets, setSupportTickets] = useState<SupportTicketSummary[]>([]);
   const [referrals, setReferrals] = useState<ReferralSummary[]>([]);
+  const [referralProgress, setReferralProgress] = useState<ReferralProgressSummary>({
+    successful_referrals: 0,
+    available_credit_cents: 0,
+    next_bonus_target: 3,
+    next_bonus_remaining: 3,
+    next_bonus_amount_cents: 2500,
+  });
   const [driverOffers, setDriverOffers] = useState<MiniAppDriverOffer[]>([]);
   const [cart, setCart] = useState<CartItem[]>(getStoredCart);
   const [submittingSupportTicket, setSubmittingSupportTicket] = useState(false);
@@ -322,7 +331,7 @@ function App() {
   const appRole: MiniAppRole = config?.app_role || customer?.app_role || 'customer';
   const isDriverApp = appRole === 'driver';
   const driverProfile: MiniAppDriverProfile | null = config?.driver_profile || null;
-  const availableViews: ViewKey[] = isDriverApp ? ['home', 'orders', 'account'] : ['home', 'menu', 'orders', 'account'];
+  const availableViews: ViewKey[] = isDriverApp ? ['home', 'orders', 'account'] : ['home', 'menu', 'orders', 'referrals', 'account'];
   const deferredMenuSearch = useDeferredValue(menuSearch);
   const subtotalCents = cart.reduce((sum, item) => sum + item.price_cents * item.quantity, 0);
   const totalCents = subtotalCents + (deliveryMode === 'pickup' ? 0 : deliveryFeeCents);
@@ -333,6 +342,10 @@ function App() {
     authenticated
       && (config?.phone_verification_required || (customer?.phone && !customer?.verified_bool)),
   );
+  const pendingAdminApproval = Boolean(
+    authenticated && (config?.pending_admin_approval || customer?.approval_status === 'pending'),
+  );
+  const referralRejected = Boolean(authenticated && customer?.approval_status === 'rejected');
   const minimumDeliverySubtotalCents = Number(config?.delivery_minimum_subtotal_cents ?? 0);
 
   function pushToast(message: string, tone: ToastTone = 'default') {
@@ -349,6 +362,13 @@ function App() {
     setPickupLocations([]);
     setSupportTickets([]);
     setReferrals([]);
+    setReferralProgress({
+      successful_referrals: 0,
+      available_credit_cents: 0,
+      next_bonus_target: 3,
+      next_bonus_remaining: 3,
+      next_bonus_amount_cents: 2500,
+    });
     setDriverOffers([]);
     setDeliveryFeeCents(0);
     setDeliveryZone('Awaiting address');
@@ -374,11 +394,15 @@ function App() {
         configResponse.phone_verification_required
           || (configResponse.customer.phone && !configResponse.customer.verified_bool),
       );
+      const requiresAdminApproval = Boolean(
+        configResponse.pending_admin_approval || configResponse.customer.approval_status === 'pending',
+      );
+      const approvalRejected = configResponse.customer.approval_status === 'rejected';
       setConfig(configResponse);
       setCustomer(configResponse.customer);
       setVerificationPhone(configResponse.customer.phone || '');
 
-      if (requiresPhoneVerification) {
+      if (requiresPhoneVerification || requiresAdminApproval || approvalRejected) {
         setVerificationCode('');
         setVerificationCodeSent(false);
         setOrders([]);
@@ -387,10 +411,23 @@ function App() {
         setPickupLocations([]);
         setSupportTickets([]);
         setReferrals([]);
+        setReferralProgress({
+          successful_referrals: 0,
+          available_credit_cents: 0,
+          next_bonus_target: 3,
+          next_bonus_remaining: 3,
+          next_bonus_amount_cents: 2500,
+        });
         setDriverOffers([]);
         setCart([]);
         setDeliveryFeeCents(0);
-        setDeliveryZone('Verification required');
+        setDeliveryZone(
+          requiresPhoneVerification
+            ? 'Verification required'
+            : requiresAdminApproval
+              ? 'Awaiting admin approval'
+              : 'Access blocked',
+        );
         return;
       }
 
@@ -404,8 +441,17 @@ function App() {
           miniappRequest<PickupLocation[]>(token, '/pickup-addresses'),
           miniappRequest<SupportTicketSummary[]>(token, '/support-tickets'),
           nextRole === 'customer'
-            ? miniappRequest<ReferralSummary[]>(token, '/referrals')
-            : Promise.resolve<ReferralSummary[]>([]),
+            ? miniappRequest<ReferralListResponse>(token, '/referrals')
+            : Promise.resolve<ReferralListResponse>({
+              referrals: [],
+              progress: {
+                successful_referrals: 0,
+                available_credit_cents: 0,
+                next_bonus_target: 3,
+                next_bonus_remaining: 3,
+                next_bonus_amount_cents: 2500,
+              },
+            }),
           nextRole === 'driver'
             ? miniappRequest<MiniAppDriverOffer[]>(token, '/driver/offers')
             : Promise.resolve<MiniAppDriverOffer[]>([]),
@@ -416,13 +462,27 @@ function App() {
         setMenu(Array.isArray(menuResponse) ? menuResponse : []);
         setAddresses(Array.isArray(addressesResponse) ? addressesResponse : []);
         setPickupLocations(Array.isArray(pickupResponse) ? pickupResponse : []);
-        setReferrals(Array.isArray(referralsResponse) ? referralsResponse : []);
+        setReferrals(Array.isArray(referralsResponse?.referrals) ? referralsResponse.referrals : []);
+        setReferralProgress(referralsResponse?.progress ?? {
+          successful_referrals: 0,
+          available_credit_cents: 0,
+          next_bonus_target: 3,
+          next_bonus_remaining: 3,
+          next_bonus_amount_cents: 2500,
+        });
         setDriverOffers([]);
       } else {
         setMenu([]);
         setAddresses([]);
         setPickupLocations(Array.isArray(pickupResponse) ? pickupResponse : []);
         setReferrals([]);
+        setReferralProgress({
+          successful_referrals: 0,
+          available_credit_cents: 0,
+          next_bonus_target: 3,
+          next_bonus_remaining: 3,
+          next_bonus_amount_cents: 2500,
+        });
         setDriverOffers(Array.isArray(offersResponse) ? offersResponse : []);
         setCart([]);
         setDeliveryFeeCents(0);
@@ -549,8 +609,15 @@ function App() {
       return;
     }
     try {
-      const referralsResponse = await miniappRequest<ReferralSummary[]>(token, '/referrals');
-      setReferrals(Array.isArray(referralsResponse) ? referralsResponse : []);
+      const referralsResponse = await miniappRequest<ReferralListResponse>(token, '/referrals');
+      setReferrals(Array.isArray(referralsResponse?.referrals) ? referralsResponse.referrals : []);
+      setReferralProgress(referralsResponse?.progress ?? {
+        successful_referrals: 0,
+        available_credit_cents: 0,
+        next_bonus_target: 3,
+        next_bonus_remaining: 3,
+        next_bonus_amount_cents: 2500,
+      });
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         resetAuthedState('Mini App session expired. Reopen the app from Telegram.', 'error');
@@ -710,7 +777,7 @@ function App() {
     }
   }
 
-  async function createReferralInvite(aliasUsername?: string, aliasEmail?: string, notes?: string): Promise<boolean> {
+  async function createReferralInvite(notes?: string): Promise<boolean> {
     if (!sessionToken || isDriverApp) {
       return false;
     }
@@ -720,8 +787,6 @@ function App() {
       await miniappRequest<{ message: string; referral: ReferralSummary }>(sessionToken, '/referrals', {
         method: 'POST',
         body: JSON.stringify({
-          alias_username: aliasUsername || null,
-          alias_email: aliasEmail || null,
           notes: notes || null,
         }),
       });
@@ -1392,6 +1457,20 @@ function App() {
           onSubmit={confirmPhoneVerification}
           onLogout={() => void logout()}
         />
+      ) : authenticated && pendingAdminApproval ? (
+        <ReferralApprovalView
+          mode="pending"
+          supportText={supportText}
+          onRefresh={() => void loadAppData(sessionToken)}
+          onLogout={() => void logout()}
+        />
+      ) : authenticated && referralRejected ? (
+        <ReferralApprovalView
+          mode="rejected"
+          supportText={supportText}
+          onRefresh={() => void loadAppData(sessionToken)}
+          onLogout={() => void logout()}
+        />
       ) : authenticated ? (
         <div className={`miniapp-layout ${isDriverApp ? 'driver-layout' : ''}`}>
           <main className="content-column">
@@ -1418,19 +1497,15 @@ function App() {
                 driverProfile={driverProfile}
                 orders={orders}
                 supportTickets={supportTickets}
-                referrals={referrals}
                 driverOffers={driverOffers}
                 pendingApprovalCount={pendingApprovalCount}
                 orderCount={orders.length}
                 supportText={supportText}
                 submittingSupportTicket={submittingSupportTicket}
-                creatingReferral={creatingReferral}
                 offerActionId={offerActionId}
                 onRefreshSupportTickets={() => void refreshSupportTickets()}
-                onRefreshReferrals={() => void refreshReferrals()}
                 onRefreshDriverOffers={() => void refreshDriverOffers()}
                 onCreateSupportTicket={createSupportTicket}
-                onCreateReferral={createReferralInvite}
                 onRespondToOffer={respondToDriverOffer}
               />
             ) : null}
@@ -1461,6 +1536,16 @@ function App() {
                 onDriverDeliveryTimeUpdate={updateDriverDeliveryTime}
                 onPickupEtaUpdate={submitPickupEta}
                 onPickupArrivalUpload={uploadPickupArrivalPhoto}
+              />
+            ) : null}
+
+            {!isDriverApp && activeView === 'referrals' ? (
+              <ReferralsView
+                referrals={referrals}
+                progress={referralProgress}
+                creating={creatingReferral}
+                onRefresh={() => void refreshReferrals()}
+                onCreate={createReferralInvite}
               />
             ) : null}
 
@@ -1630,6 +1715,51 @@ function PhoneVerificationView({
   );
 }
 
+function ReferralApprovalView({
+  mode,
+  supportText,
+  onRefresh,
+  onLogout,
+}: {
+  mode: 'pending' | 'rejected';
+  supportText: string;
+  onRefresh: () => void;
+  onLogout: () => void;
+}) {
+  const pending = mode === 'pending';
+  return (
+    <article className="surface auth-surface verification-surface">
+      <p className="eyebrow">Referral Review</p>
+      <h2>{pending ? 'Awaiting admin approval' : 'Referral access was rejected'}</h2>
+      <p className="muted-copy">
+        {pending
+          ? 'This invited account has been created and verified. An admin still needs to approve it before ordering is unlocked.'
+          : 'This invited account was rejected during admin review. Contact support if you need clarification or a replacement invite.'}
+      </p>
+
+      <div className={`inline-banner ${pending ? '' : 'error'}`}>
+        {pending ? 'Support can review the referral and approve it from the admin queue.' : 'Ordering and referral tools are blocked for this account.'}
+      </div>
+
+      <div className="summary-box verification-summary">
+        <div>
+          <span>Support</span>
+          <strong>{supportText}</strong>
+        </div>
+      </div>
+
+      <div className="row-actions">
+        <button className="primary-button" onClick={onRefresh} type="button">
+          Check Again
+        </button>
+        <button className="secondary-button" onClick={onLogout} type="button">
+          Logout
+        </button>
+      </div>
+    </article>
+  );
+}
+
 function AuthView({
   inviteCode,
   pending,
@@ -1680,19 +1810,15 @@ function HomeView({
   driverProfile,
   orders,
   supportTickets,
-  referrals,
   driverOffers,
   pendingApprovalCount,
   orderCount,
   supportText,
   submittingSupportTicket,
-  creatingReferral,
   offerActionId,
   onRefreshSupportTickets,
-  onRefreshReferrals,
   onRefreshDriverOffers,
   onCreateSupportTicket,
-  onCreateReferral,
   onRespondToOffer,
 }: {
   appRole: MiniAppRole;
@@ -1701,16 +1827,13 @@ function HomeView({
   driverProfile: MiniAppDriverProfile | null;
   orders: MiniAppOrder[];
   supportTickets: SupportTicketSummary[];
-  referrals: ReferralSummary[];
   driverOffers: MiniAppDriverOffer[];
   pendingApprovalCount: number;
   orderCount: number;
   supportText: string;
   submittingSupportTicket: boolean;
-  creatingReferral: boolean;
   offerActionId: number | null;
   onRefreshSupportTickets: () => void;
-  onRefreshReferrals: () => void;
   onRefreshDriverOffers: () => void;
   onCreateSupportTicket: (
     subject: string,
@@ -1719,7 +1842,6 @@ function HomeView({
     priority: string,
     orderNumber?: string,
   ) => Promise<boolean>;
-  onCreateReferral: (aliasUsername?: string, aliasEmail?: string, notes?: string) => Promise<boolean>;
   onRespondToOffer: (offerId: number, action: 'accept' | 'decline') => void;
 }) {
   if (appRole === 'driver') {
@@ -1831,13 +1953,7 @@ function HomeView({
         <p className="muted-copy">{supportText}</p>
       </article>
 
-      <div className="feature-grid">
-        <ReferralPanel
-          referrals={referrals}
-          creating={creatingReferral}
-          onRefresh={onRefreshReferrals}
-          onCreate={onCreateReferral}
-        />
+      <div className="feature-grid single-feature-grid">
         <SupportPanel
           appRole={appRole}
           tickets={supportTickets}
@@ -2068,84 +2184,105 @@ function SupportPanel({
   );
 }
 
-function ReferralPanel({
+function ReferralsView({
   referrals,
+  progress,
   creating,
   onRefresh,
   onCreate,
 }: {
   referrals: ReferralSummary[];
+  progress: ReferralProgressSummary;
   creating: boolean;
   onRefresh: () => void;
-  onCreate: (aliasUsername?: string, aliasEmail?: string, notes?: string) => Promise<boolean>;
+  onCreate: (notes?: string) => Promise<boolean>;
 }) {
-  const [aliasUsername, setAliasUsername] = useState('');
-  const [aliasEmail, setAliasEmail] = useState('');
   const [notes, setNotes] = useState('');
+  const [copying, setCopying] = useState('');
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const created = await onCreate(
-      aliasUsername.trim() || undefined,
-      aliasEmail.trim() || undefined,
-      notes.trim() || undefined,
-    );
+    const created = await onCreate(notes.trim() || undefined);
     if (created) {
-      setAliasUsername('');
-      setAliasEmail('');
       setNotes('');
     }
   }
 
+  async function handleCopy(value: string) {
+    if (!value) {
+      return;
+    }
+    setCopying(value);
+    try {
+      await copyText(value);
+    } finally {
+      setCopying('');
+    }
+  }
+
   return (
-    <article className="surface">
-      <div className="section-head">
-        <div>
-          <p className="eyebrow">Referrals</p>
-          <h3>Create a private invite</h3>
-        </div>
-        <button className="secondary-button" onClick={onRefresh} type="button">
-          Refresh
-        </button>
+    <section className="view-stack">
+      <div className="feature-grid referral-progress-grid">
+        <article className="surface stats-panel">
+          <p className="eyebrow">Referral Progress</p>
+          <StatTile label="Successful Referrals" value={`${progress.successful_referrals}`} />
+          <StatTile label="Available Credit" value={formatCurrency(progress.available_credit_cents)} tone="olive" />
+          <StatTile
+            label="Next Bonus Milestone"
+            value={`${progress.next_bonus_target} (${progress.next_bonus_remaining} left)`}
+            tone="warning"
+          />
+        </article>
+
+        <article className="surface">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">Refer a Friend</p>
+              <h3>Generate a private referral code</h3>
+            </div>
+            <button className="secondary-button" onClick={onRefresh} type="button">
+              Refresh Ledger
+            </button>
+          </div>
+
+          <form className="stack" onSubmit={handleSubmit}>
+            <label className="field">
+              <span>Who is this invite for?</span>
+              <textarea
+                placeholder="Friend name, event guest, promoter, or internal reference"
+                rows={3}
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+              />
+            </label>
+            <div className="row-actions">
+              <button className="primary-button" disabled={creating} type="submit">
+                {creating ? 'Generating…' : referrals.length ? 'Generate New Code' : 'Refer a Friend'}
+              </button>
+            </div>
+          </form>
+
+          <p className="helper-text">
+            Friends get $25 off their first order of $100+. You receive $15 credit after their first approved, paid, delivered qualifying order, plus an extra $25 bonus every 3 successful referrals.
+          </p>
+        </article>
       </div>
 
-      <form className="stack" onSubmit={handleSubmit}>
-        <label className="field">
-          <span>Alias username</span>
-          <input
-            placeholder="private_member"
-            value={aliasUsername}
-            onChange={(event) => setAliasUsername(event.target.value)}
-          />
-        </label>
-        <label className="field">
-          <span>Alias email</span>
-          <input
-            placeholder="member@example.com"
-            value={aliasEmail}
-            onChange={(event) => setAliasEmail(event.target.value)}
-          />
-        </label>
-        <label className="field">
-          <span>Internal note</span>
-          <textarea
-            placeholder="Reference name, relationship, or use case"
-            rows={3}
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-          />
-        </label>
-        <button className="primary-button" disabled={creating} type="submit">
-          {creating ? 'Creating…' : 'Create Referral Invite'}
-        </button>
-      </form>
+      <article className="surface">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">Referral Ledger</p>
+            <h3>Track every generated code</h3>
+          </div>
+          <button className="secondary-button" onClick={onRefresh} type="button">
+            Refresh
+          </button>
+        </div>
 
-      <div className="detail-block">
-        <h4>Referral ledger</h4>
         {referrals.length ? (
           <div className="ticket-stack">
             {referrals.map((referral) => (
-              <article key={referral.id} className="ticket-card">
+              <article key={referral.id} className="ticket-card referral-card">
                 <div className="section-head compact">
                   <div>
                     <strong>{referral.invite_code || 'Pending code'}</strong>
@@ -2153,18 +2290,43 @@ function ReferralPanel({
                   </div>
                   <StatusPill tone={referral.status}>{humanize(referral.status)}</StatusPill>
                 </div>
-                <p className="helper-text">
-                  Reward: {humanize(referral.reward_status)} {referral.referred_name ? `• Claimed by ${referral.referred_name}` : ''}
-                </p>
-                {referral.notes ? <p className="helper-text">{referral.notes}</p> : null}
+
+                <dl className="detail-grid">
+                  <DetailItem label="Reward Status" value={humanize(referral.reward_status)} />
+                  <DetailItem label="Referred User" value={referral.referred_name || 'Not signed up yet'} />
+                  <DetailItem label="Friend Discount" value={formatCurrency(referral.friend_discount_cents || 2500)} />
+                  <DetailItem label="Your Credit" value={formatCurrency(referral.referrer_credit_cents || 1500)} />
+                </dl>
+
+                {referral.notes ? <p className="helper-text">Who is this invite for? {referral.notes}</p> : null}
+                {referral.approval_note ? <p className="helper-text">Admin note: {referral.approval_note}</p> : null}
+
+                <div className="row-actions wrap-actions">
+                  <button
+                    className="ghost-button compact-button"
+                    disabled={!referral.invite_code || copying === referral.invite_code}
+                    onClick={() => void handleCopy(referral.invite_code || '')}
+                    type="button"
+                  >
+                    {copying === referral.invite_code ? 'Copying…' : 'Copy Code'}
+                  </button>
+                  <button
+                    className="ghost-button compact-button"
+                    disabled={!referral.invite_link || copying === referral.invite_link}
+                    onClick={() => void handleCopy(referral.invite_link || '')}
+                    type="button"
+                  >
+                    {copying === referral.invite_link ? 'Copying…' : 'Copy Link'}
+                  </button>
+                </div>
               </article>
             ))}
           </div>
         ) : (
-          <EmptySurface title="No referrals yet" copy="Generate a private invite here and track when it gets claimed." compact />
+          <EmptySurface title="No referrals yet" copy="Generate your first code here. New signups, approvals, and rewards will appear in this ledger." compact />
         )}
-      </div>
-    </article>
+      </article>
+    </section>
   );
 }
 
@@ -3246,11 +3408,11 @@ function StatTile({ label, value, tone = 'default' }: { label: string; value: st
 
 function StatusPill({ tone, children }: { tone: string; children: string }) {
   const normalizedTone =
-    tone === 'approved' || tone === 'delivered' || tone === 'out_for_delivery'
+    tone === 'approved' || tone === 'delivered' || tone === 'out_for_delivery' || tone === 'reward_issued'
       ? 'approved'
-      : tone === 'pending' || tone === 'placed' || tone === 'assigned' || tone === 'preparing' || tone === 'ready' || tone === 'scheduled'
+      : tone === 'pending' || tone === 'placed' || tone === 'assigned' || tone === 'preparing' || tone === 'ready' || tone === 'scheduled' || tone === 'signed_up' || tone === 'awaiting_admin_approval' || tone === 'qualified_order_placed'
         ? 'pending'
-        : tone === 'cancelled'
+        : tone === 'cancelled' || tone === 'rejected'
           ? 'cancelled'
           : 'neutral';
 

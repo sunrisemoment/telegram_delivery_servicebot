@@ -22,6 +22,10 @@ export interface InviteSummary {
   alias_username?: string | null;
   alias_email?: string | null;
   target_role: MiniAppRole;
+  invite_kind?: string | null;
+  campaign_tag?: string | null;
+  source_tag?: string | null;
+  referral_batch_id?: number | null;
   notes?: string | null;
   status: string;
   claimed_by_customer_id?: number | null;
@@ -334,6 +338,7 @@ export interface MiniAppCustomer {
   alias_email?: string | null;
   app_role?: MiniAppRole | null;
   account_status?: string | null;
+  approval_status?: string | null;
   verified_bool?: boolean;
   phone_verified_at?: string | null;
   invite_code?: string | null;
@@ -373,6 +378,7 @@ export interface MiniAppConfig {
   btc_discount_percent: number;
   delivery_minimum_subtotal_cents?: number;
   phone_verification_required?: boolean;
+  pending_admin_approval?: boolean;
   contact: {
     welcome_message?: string | null;
     telegram_username?: string | null;
@@ -455,18 +461,95 @@ export interface SupportTicketSummary {
   updated_at?: string | null;
 }
 
+export interface ReferralProgressSummary {
+  successful_referrals: number;
+  available_credit_cents: number;
+  next_bonus_target: number;
+  next_bonus_remaining: number;
+  next_bonus_amount_cents: number;
+}
+
 export interface ReferralSummary {
   id: number;
+  invite_id?: number | null;
   invite_code?: string | null;
+  invite_kind?: string | null;
+  invite_link?: string | null;
+  campaign_tag?: string | null;
+  source_tag?: string | null;
+  batch_id?: number | null;
+  batch_name?: string | null;
   referrer_customer_id?: number | null;
   referrer_name?: string | null;
   referred_customer_id?: number | null;
   referred_name?: string | null;
+  referred_phone?: string | null;
+  approval_status?: string | null;
   status: string;
   reward_status: string;
   notes?: string | null;
+  approval_note?: string | null;
+  qualifying_order_number?: string | null;
+  friend_discount_cents?: number;
+  referrer_credit_cents?: number;
+  reward_total_cents?: number;
   created_at?: string | null;
+  signed_up_at?: string | null;
   claimed_at?: string | null;
+  approved_at?: string | null;
+  rejected_at?: string | null;
+  qualifying_order_placed_at?: string | null;
+  friend_discount_applied_at?: string | null;
+  reward_issued_at?: string | null;
+}
+
+export interface ReferralRewardSummary {
+  id: number;
+  recipient_customer_id: number;
+  recipient_name?: string | null;
+  referral_id?: number | null;
+  order_number?: string | null;
+  reward_type: string;
+  milestone_number?: number | null;
+  amount_cents: number;
+  status: string;
+  notes?: string | null;
+  issued_by?: string | null;
+  issued_at?: string | null;
+  created_at?: string | null;
+}
+
+export interface ReferralBatchSummary {
+  id: number;
+  name: string;
+  campaign_tag?: string | null;
+  source_tag?: string | null;
+  code_count: number;
+  created_code_count?: number;
+  claimed_count?: number;
+  notes?: string | null;
+  created_by?: number | null;
+  created_by_name?: string | null;
+  created_at?: string | null;
+}
+
+export interface ReferralListResponse {
+  referrals: ReferralSummary[];
+  progress: ReferralProgressSummary;
+}
+
+export interface AdminReferralDashboardResponse {
+  referrals: ReferralSummary[];
+  pending_approvals: ReferralSummary[];
+  rewards: ReferralRewardSummary[];
+  batches: ReferralBatchSummary[];
+  summary: {
+    created_count: number;
+    signed_up_count: number;
+    awaiting_admin_approval_count: number;
+    approved_count: number;
+    reward_issued_count: number;
+  };
 }
 
 export interface AuditLogSummary {
