@@ -25,7 +25,7 @@ const LEGACY_SESSION_STORAGE_KEY = 'miniappSessionToken';
 const CART_STORAGE_KEY = 'delivery_bot.miniapp_cart';
 const LEGACY_CART_STORAGE_KEY = 'miniappCart';
 
-type ViewKey = 'home' | 'menu' | 'orders' | 'referrals' | 'account';
+type ViewKey = 'home' | 'menu' | 'orders' | 'referrals' | 'account' | 'support';
 type DeliveryMode = 'delivery' | 'pickup';
 type ToastTone = 'default' | 'error';
 type AuthTone = 'default' | 'error';
@@ -331,7 +331,7 @@ function App() {
   const appRole: MiniAppRole = config?.app_role || customer?.app_role || 'customer';
   const isDriverApp = appRole === 'driver';
   const driverProfile: MiniAppDriverProfile | null = config?.driver_profile || null;
-  const availableViews: ViewKey[] = isDriverApp ? ['home', 'orders', 'account'] : ['home', 'menu', 'orders', 'referrals', 'account'];
+  const availableViews: ViewKey[] = isDriverApp ? ['home', 'orders', 'account'] : ['home', 'menu', 'orders', 'referrals', 'account', 'support'];
   const deferredMenuSearch = useDeferredValue(menuSearch);
   const subtotalCents = cart.reduce((sum, item) => sum + item.price_cents * item.quantity, 0);
   const totalCents = subtotalCents + (deliveryMode === 'pickup' ? 0 : deliveryFeeCents);
@@ -1571,6 +1571,17 @@ function App() {
                 onLogout={() => void logout()}
               />
             ) : null}
+
+            {!isDriverApp && activeView === 'support' ? (
+              <CustomerSupportView
+                supportText={supportText}
+                tickets={supportTickets}
+                orders={orders}
+                submitting={submittingSupportTicket}
+                onRefresh={() => void refreshSupportTickets()}
+                onCreate={createSupportTicket}
+              />
+            ) : null}
           </main>
 
           {!isDriverApp ? (
@@ -1942,7 +1953,33 @@ function HomeView({
           <StatTile label="BTC Discount" value={`${config?.btc_discount_percent || 0}%`} tone="olive" />
         </article>
       </div>
+    </section>
+  );
+}
 
+function CustomerSupportView({
+  supportText,
+  tickets,
+  orders,
+  submitting,
+  onRefresh,
+  onCreate,
+}: {
+  supportText: string;
+  tickets: SupportTicketSummary[];
+  orders: MiniAppOrder[];
+  submitting: boolean;
+  onRefresh: () => void;
+  onCreate: (
+    subject: string,
+    message: string,
+    category: string,
+    priority: string,
+    orderNumber?: string,
+  ) => Promise<boolean>;
+}) {
+  return (
+    <section className="view-stack">
       <article className="surface support-panel">
         <div className="section-head">
           <div>
@@ -1955,12 +1992,12 @@ function HomeView({
 
       <div className="feature-grid single-feature-grid">
         <SupportPanel
-          appRole={appRole}
-          tickets={supportTickets}
+          appRole="customer"
+          tickets={tickets}
           orders={orders}
-          submitting={submittingSupportTicket}
-          onRefresh={onRefreshSupportTickets}
-          onCreate={onCreateSupportTicket}
+          submitting={submitting}
+          onRefresh={onRefresh}
+          onCreate={onCreate}
         />
       </div>
     </section>
