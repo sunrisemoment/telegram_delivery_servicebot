@@ -16,7 +16,7 @@ class Customer(Base):
     alias_username = Column(String(100), unique=True)
     alias_email = Column(String(200), unique=True)
     app_role = Column(String(20), default="customer")
-    account_status = Column(String(20), default="active")
+    account_status = Column(String(40), default="active")
     approval_status = Column(String(20), default="approved")
     invite_id = Column(BigInteger, ForeignKey("customer_invites.id"))
     verified_bool = Column(Boolean, default=False)
