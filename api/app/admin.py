@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile, Request, Response
 import os
 import random
-import shutil
-from sqlalchemy import func
+from sqlalchemy import func, inspect
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from .database import get_db
 from . import crud, models, schemas
@@ -46,7 +46,7 @@ from .dispatch_service import (
     start_dispatch_queue,
 )
 from .miniapp_auth import normalize_app_role
-from .menu_utils import get_menu_item_photo_urls
+from .menu_utils import get_menu_item_photo_urls, normalize_photo_urls
 from .phone_utils import normalize_phone_number
 from .referral_service import (
     BULK_REFERRAL_INVITE_KIND,
@@ -69,6 +69,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 UPLOAD_DIR = "static/uploads"
+MAX_ADMIN_UPLOAD_BYTES = 15 * 1024 * 1024
 
 
 def _generate_invite_code(db: Session) -> str:
@@ -272,6 +273,36 @@ def _serialize_menu_item(item: models.MenuItem) -> dict:
         "photo_url": photo_urls[0] if photo_urls else None,
         "photo_urls": photo_urls,
     }
+
+
+def _menu_item_photos_table_exists(db: Session) -> bool:
+    inspector = inspect(db.get_bind())
+    return inspector.has_table("menu_item_photos")
+
+
+def _get_menu_item_photo_urls_for_cleanup(db: Session, menu_item: models.MenuItem) -> list[str]:
+    if not _menu_item_photos_table_exists(db):
+        return normalize_photo_urls([], menu_item.photo_url)
+
+    photo_rows = db.query(models.MenuItemPhoto).filter(
+        models.MenuItemPhoto.menu_item_id == menu_item.id
+    ).order_by(models.MenuItemPhoto.sort_order.asc(), models.MenuItemPhoto.id.asc()).all()
+    return normalize_photo_urls([photo.photo_url for photo in photo_rows], menu_item.photo_url)
+
+
+def _delete_menu_item_gallery_rows(db: Session, item_id: int) -> None:
+    if not _menu_item_photos_table_exists(db):
+        return
+
+    db.query(models.MenuItemPhoto).filter(
+        models.MenuItemPhoto.menu_item_id == item_id
+    ).delete(synchronize_session=False)
+
+
+def _delete_menu_item_row(db: Session, item_id: int) -> None:
+    db.query(models.MenuItem).filter(
+        models.MenuItem.id == item_id
+    ).delete(synchronize_session=False)
 
 
 def _normalize_invite_target_role(target_role: str | None) -> str:
@@ -764,7 +795,12 @@ async def update_menu_item_endpoint(item_id: int, update_data: dict, db: Session
 @router.delete("/menu/items/{item_id}")
 async def delete_menu_item_endpoint(item_id: int, db: Session = Depends(get_db), admin: str = Depends(get_current_admin)):
     """Delete a menu item (soft delete)"""
-    menu_item = delete_menu_item(db, item_id)
+    try:
+        menu_item = delete_menu_item(db, item_id)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Soft delete failed for menu item %s", item_id)
+        raise HTTPException(status_code=500, detail="Menu item deactivation failed") from exc
     if not menu_item:
         raise HTTPException(status_code=404, detail="Menu item not found")
     
@@ -812,6 +848,12 @@ async def upload_photo(
         allowed_types = ['image/jpeg', 'image/png', 'image/jpg', 'image/gif', 'image/webp']
         if file.content_type not in allowed_types:
             raise HTTPException(status_code=400, detail="File must be an image (JPEG, PNG, GIF, WebP)")
+
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="Select an image before uploading")
+        if len(file_bytes) > MAX_ADMIN_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Image must be 15MB or smaller")
         
         # Remove old photo if provided
         if old_photo_url:
@@ -824,14 +866,16 @@ async def upload_photo(
         
         # Save file
         with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(file_bytes)
         
         # Return URL
         photo_url = f"/static/uploads/{unique_filename}"
         print(f"✅ Upload successful: {photo_url}")
         
         return {"photo_url": photo_url, "filename": unique_filename}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
     finally:
@@ -1443,9 +1487,14 @@ async def permanently_delete_menu_item(
             detail=f"Cannot delete menu item. It has {driver_event_references} driver stock events."
         )
     
-    # Delete the item
-    db.delete(menu_item)
-    db.commit()
+    try:
+        _delete_menu_item_gallery_rows(db, item_id)
+        _delete_menu_item_row(db, item_id)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Permanent delete failed for menu item %s", item_id)
+        raise HTTPException(status_code=500, detail="Menu item permanent delete failed") from exc
     
     return {"message": "Menu item permanently deleted"}
 # Add a utility function for JSON searching in orders
@@ -1533,13 +1582,11 @@ async def force_delete_menu_item(
             models.DriverStockEvent.menu_item_id == item_id
         ).delete()
         
-        await remove_photo_gallery(get_menu_item_photo_urls(menu_item))
-        db.query(models.MenuItemPhoto).filter(
-            models.MenuItemPhoto.menu_item_id == item_id
-        ).delete(synchronize_session=False)
+        await remove_photo_gallery(_get_menu_item_photo_urls_for_cleanup(db, menu_item))
+        _delete_menu_item_gallery_rows(db, item_id)
 
         # Finally delete the menu item
-        db.delete(menu_item)
+        _delete_menu_item_row(db, item_id)
         db.commit()
         
         return {
@@ -1887,14 +1934,15 @@ async def permanently_delete_menu_item_universal(
             detail=f"Cannot delete menu item. It has references: {inventory_references} reservations, {driver_stock_references} stock records, {driver_event_references} events."
         )
     
-    await remove_photo_gallery(get_menu_item_photo_urls(menu_item))
-    db.query(models.MenuItemPhoto).filter(
-        models.MenuItemPhoto.menu_item_id == item_id
-    ).delete(synchronize_session=False)
-
-    # Delete the item
-    db.delete(menu_item)
-    db.commit()
+    try:
+        await remove_photo_gallery(_get_menu_item_photo_urls_for_cleanup(db, menu_item))
+        _delete_menu_item_gallery_rows(db, item_id)
+        _delete_menu_item_row(db, item_id)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Permanent universal delete failed for menu item %s", item_id)
+        raise HTTPException(status_code=500, detail="Menu item permanent delete failed") from exc
     
     return {"message": "Menu item permanently deleted"}
 

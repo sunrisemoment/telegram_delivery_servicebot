@@ -97,6 +97,15 @@ def ensure_runtime_schema():
         "UPDATE referrals SET status = 'signed_up', signed_up_at = COALESCE(signed_up_at, claimed_at) WHERE status IN ('pending', 'claimed') AND referred_customer_id IS NOT NULL",
         "UPDATE orders SET status = 'delivered' WHERE status = 'completed'",
         "UPDATE orders SET payment_status = 'paid_confirmed' WHERE payment_status = 'paid' AND payment_confirmed = TRUE",
+        """
+        CREATE TABLE IF NOT EXISTS menu_item_photos (
+            id BIGSERIAL PRIMARY KEY,
+            menu_item_id BIGINT NOT NULL REFERENCES menu_items(id),
+            photo_url TEXT NOT NULL,
+            sort_order INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+        """,
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS central_location_name VARCHAR(120) DEFAULT 'Atlantic Station'",
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS central_location_address VARCHAR(255) DEFAULT 'Atlantic Station, Atlanta, GA'",
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS central_location_lat DOUBLE PRECISION DEFAULT 33.7901",

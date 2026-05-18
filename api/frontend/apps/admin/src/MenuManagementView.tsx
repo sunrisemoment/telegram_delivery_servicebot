@@ -157,8 +157,8 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
         return;
       }
 
-      if (file.size > 5 * 1024 * 1024) {
-        setError('Each photo must be smaller than 5MB.');
+      if (file.size > 15 * 1024 * 1024) {
+        setError('Each photo must be smaller than 15MB.');
         return;
       }
 
@@ -538,7 +538,7 @@ export default function MenuManagementView({ token, onUnauthorized }: { token: s
                 <span>Photos</span>
                 <input accept="image/*" multiple onChange={handlePhotoSelection} type="file" />
               </label>
-              <p className="muted-copy">Upload multiple product photos. The first photo becomes the primary menu thumbnail.</p>
+              <p className="muted-copy">Upload multiple product photos. The first photo becomes the primary menu thumbnail. Large images are optimized before upload.</p>
             </div>
             <div className="gallery-editor-grid">
               {photos.length ? (

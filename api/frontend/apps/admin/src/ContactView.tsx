@@ -131,8 +131,8 @@ export default function ContactView({ token, onUnauthorized }: { token: string; 
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      setError('Welcome photo must be smaller than 5MB.');
+    if (file.size > 15 * 1024 * 1024) {
+      setError('Welcome photo must be smaller than 15MB.');
       return;
     }
 
@@ -325,6 +325,7 @@ export default function ContactView({ token, onUnauthorized }: { token: string; 
                   <span>Photo</span>
                   <input accept="image/*" onChange={handlePhotoSelection} type="file" />
                 </label>
+                <p className="muted-copy">Large images are optimized in the browser before upload.</p>
                 {(welcomePhotoPreviewUrl || savedWelcomePhotoUrl) && (
                   <button className="ghost-button compact-button" onClick={removeWelcomePhoto} type="button">
                     Remove Photo

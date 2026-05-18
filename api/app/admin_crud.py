@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func, extract, and_, or_
+from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime, date, timedelta
 from typing import List, Optional
 from . import models
@@ -300,9 +301,15 @@ def delete_menu_item(db: Session, item_id: int):
     menu_item = db.query(models.MenuItem).filter(models.MenuItem.id == item_id).first()
     if not menu_item:
         return None
-    
-    menu_item.active = False
-    db.commit()
+
+    try:
+        menu_item.active = False
+        db.commit()
+        db.refresh(menu_item)
+    except SQLAlchemyError:
+        db.rollback()
+        raise
+
     return menu_item
 
 def get_categories(db: Session):
